@@ -1,0 +1,9 @@
+# Tài liệu nội bộ nhóm — không công khai
+Project-Description-1.docx
+
+# Log / rác hệ thống
+*.log
+__pycache__/
+.ipynb_checkpoints/
+.DS_Store
+Thumbs.db

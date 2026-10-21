@@ -1,0 +1,339 @@
+/* style.css — shared stylesheet cho toàn bộ khóa học Triton.
+   Mục tiêu: sạch, in đẹp, đọc nhanh. Cảm hứng Tufte: nhiều khoảng trắng,
+   typography là giao diện chính. */
+
+:root {
+  --ink: #1a1a2e;
+  --ink-soft: #4a4a68;
+  --accent: #0f6b5c;        /* xanh NVIDIA-leaning nhưng dịu */
+  --accent-soft: #e6f2ef;
+  --code-bg: #f4f4f8;
+  --code-ink: #2d2d44;
+  --warn-bg: #fff6e6;
+  --warn-ink: #8a5a00;
+  --ok-bg: #e8f6ee;
+  --ok-ink: #196b3d;
+  --err-bg: #fdeaea;
+  --err-ink: #8f1f1f;
+  --border: #dcdce6;
+  --paper: #fffdf9;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: "Source Sans 3", "Inter", -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-size: 17px;
+  line-height: 1.65;
+}
+
+main {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 2.5rem 1.5rem 5rem;
+}
+
+/* ---- Typography ---- */
+h1, h2, h3, h4 {
+  font-family: "Charter", Georgia, "Times New Roman", serif;
+  line-height: 1.25;
+  color: var(--ink);
+}
+h1 { font-size: 2rem; margin: 0 0 .4rem; }
+h2 { font-size: 1.45rem; margin-top: 3rem; border-bottom: 2px solid var(--accent-soft); padding-bottom: .3rem; }
+h3 { font-size: 1.15rem; margin-top: 2rem; }
+
+p { margin: 1rem 0; }
+a { color: var(--accent); text-underline-offset: 3px; }
+strong { color: var(--ink); }
+
+.subtitle {
+  color: var(--ink-soft);
+  font-size: 1.05rem;
+  margin-top: 0;
+}
+
+.meta-line {
+  color: var(--ink-soft);
+  font-size: .85rem;
+  letter-spacing: .02em;
+  border-top: 3px solid var(--accent);
+  padding-top: .6rem;
+  margin-bottom: 2rem;
+}
+
+/* ---- Code ---- */
+code {
+  font-family: "JetBrains Mono", "Fira Code", ui-monospace, Menlo, monospace;
+  font-size: .85em;
+  background: var(--code-bg);
+  padding: .12em .35em;
+  border-radius: 4px;
+  color: var(--code-ink);
+}
+
+pre {
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--accent);
+  border-radius: 6px;
+  padding: .9rem 1.1rem;
+  overflow-x: auto;
+  font-size: .85rem;
+  line-height: 1.55;
+}
+pre code { background: none; padding: 0; }
+
+.term-prompt::before { content: "$ "; color: var(--accent); font-weight: 700; }
+
+pre.output {
+  border-left-color: var(--border);
+  background: #fafafc;
+  color: var(--ink-soft);
+}
+
+/* ---- Callouts ---- */
+.callout {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: .9rem 1.2rem;
+  margin: 1.4rem 0;
+  font-size: .95rem;
+}
+.callout.tip    { background: var(--accent-soft); border-color: var(--accent); }
+.callout.warn   { background: var(--warn-bg); border-color: #e3c07a; }
+.callout.mission{ background: #eef2fb; border-color: #9db1e0; }
+.callout .label {
+  display: block;
+  font-weight: 700;
+  font-size: .78rem;
+  text-transform: uppercase;
+  letter-spacing: .08em;
+  margin-bottom: .25rem;
+}
+.callout.tip .label { color: var(--accent); }
+.callout.warn .label { color: var(--warn-ink); }
+.callout.mission .label { color: #3d5aa8; }
+
+/* ---- Tables ---- */
+table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 1.4rem 0;
+  font-size: .92rem;
+}
+th, td {
+  border: 1px solid var(--border);
+  padding: .5rem .8rem;
+  text-align: left;
+  vertical-align: top;
+}
+th { background: var(--accent-soft); font-weight: 700; }
+tbody tr:nth-child(even) { background: #fafaf6; }
+
+/* ---- Quiz (pairs with quiz.js) ---- */
+.quiz {
+  border: 2px solid var(--accent);
+  border-radius: 10px;
+  padding: 1.2rem 1.4rem;
+  margin: 2rem 0;
+  background: #fff;
+}
+.quiz h3 { margin-top: 0; }
+.quiz .q { font-weight: 600; margin: 1.2rem 0 .6rem; }
+.quiz .opts { display: grid; gap: .5rem; }
+.quiz button.opt {
+  text-align: left;
+  font: inherit;
+  padding: .55rem .9rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #fff;
+  cursor: pointer;
+  width: 100%;
+}
+.quiz button.opt:hover:not(:disabled) { border-color: var(--accent); background: var(--accent-soft); }
+.quiz button.opt.correct { background: var(--ok-bg); border-color: var(--ok-ink); color: var(--ok-ink); font-weight: 600; }
+.quiz button.opt.wrong   { background: var(--err-bg); border-color: var(--err-ink); color: var(--err-ink); }
+.quiz button.opt:disabled { cursor: default; opacity: .85; }
+.quiz .explain {
+  display: none;
+  margin-top: .8rem;
+  font-size: .92rem;
+  padding: .7rem 1rem;
+  border-radius: 6px;
+  background: var(--code-bg);
+}
+.quiz .explain.show { display: block; }
+.quiz .score { margin-top: 1.2rem; font-weight: 700; }
+
+/* ---- Checklist ---- */
+ul.checklist { list-style: none; padding-left: 0; }
+ul.checklist li { padding-left: 1.8rem; position: relative; margin: .5rem 0; }
+ul.checklist li::before { content: "☐"; position: absolute; left: 0; color: var(--accent); font-size: 1.1em; }
+
+/* ---- Diagram (ASCII pre fallback) ---- */
+pre.diagram {
+  background: #fff;
+  border: none;
+  border-left: none;
+  text-align: center;
+  font-size: .8rem;
+  line-height: 1.35;
+  color: var(--ink-soft);
+  overflow-x: auto;
+}
+
+/* ---- Enhanced Architecture Diagram Card ---- */
+.diagram-card {
+  margin: 2rem 0;
+  background: #ffffff;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 4px 20px -2px rgba(26, 26, 46, 0.06), 0 2px 6px -1px rgba(26, 26, 46, 0.04);
+  overflow: hidden;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.diagram-card:hover {
+  border-color: #cbd5e1;
+  box-shadow: 0 8px 26px -4px rgba(26, 26, 46, 0.09), 0 4px 10px -2px rgba(26, 26, 46, 0.05);
+}
+
+.diagram-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  padding: 0.85rem 1.2rem;
+  background: #fafafc;
+  border-bottom: 1px solid var(--border);
+}
+
+.diagram-title {
+  font-weight: 700;
+  font-size: 0.95rem;
+  color: var(--ink);
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.diagram-tags {
+  display: flex;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
+.d-tag {
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 0.2rem 0.55rem;
+  border-radius: 999px;
+  line-height: 1.2;
+}
+
+.d-tag-blue { background: #eff6ff; color: #1d4ed8; border: 1px solid #bfdbfe; }
+.d-tag-green { background: #ecfdf5; color: #047857; border: 1px solid #a7f3d0; }
+.d-tag-amber { background: #fffbeb; color: #b45309; border: 1px solid #fde68a; }
+
+.diagram-body {
+  padding: 1.2rem 1.2rem 0.8rem;
+  background: #ffffff;
+}
+
+.triton-arch-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-width: 100%;
+}
+
+.svg-group {
+  transition: transform 0.2s ease, filter 0.2s ease;
+}
+
+.group-port {
+  cursor: pointer;
+  transform-origin: center;
+}
+
+.group-port:hover {
+  filter: drop-shadow(0 6px 14px rgba(37, 99, 235, 0.18));
+}
+
+.group-repo, .group-sched, .group-backend {
+  cursor: default;
+}
+
+.group-repo:hover {
+  filter: drop-shadow(0 6px 14px rgba(217, 119, 6, 0.18));
+}
+
+.group-sched:hover {
+  filter: drop-shadow(0 6px 14px rgba(37, 99, 235, 0.18));
+}
+
+.group-backend:hover {
+  filter: drop-shadow(0 6px 14px rgba(15, 107, 92, 0.2));
+}
+
+.diagram-footer {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 0.8rem;
+  padding: 1rem 1.2rem;
+  background: #fafbfc;
+  border-top: 1px solid var(--border);
+  font-size: 0.85rem;
+  color: var(--ink-soft);
+  line-height: 1.5;
+}
+
+.flow-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.55rem;
+}
+
+.flow-step .step-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #ffffff;
+  font-size: 0.75rem;
+  font-weight: 700;
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+
+/* ---- Footer nav ---- */
+.lesson-nav {
+  margin-top: 4rem;
+  padding-top: 1.2rem;
+  border-top: 1px solid var(--border);
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  font-size: .95rem;
+}
+
+/* ---- Print ---- */
+@media print {
+  body { font-size: 11pt; background: #fff; }
+  main { max-width: none; padding: 0; }
+  .quiz button.opt { border: 1px solid #999; }
+  a { color: var(--ink); text-decoration: none; }
+  pre { border: 1px solid #ccc; }
+  .no-print { display: none; }
+}

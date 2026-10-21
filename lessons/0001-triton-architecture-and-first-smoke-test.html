@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bài 0001 — Kiến trúc Triton &amp; Smoke test đầu tiên</title>
+<link rel="stylesheet" href="../assets/style.css">
+<style>.term-prompt::before{content:"$ ";}</style>
+</head>
+<body>
+<main>
+<p class="meta-line">BÀI 0001 · Triton Serving &amp; Performance · ~20 phút · hands-on trên máy bạn</p>
+<h1>Kiến trúc Triton &amp; smoke test đầu tiên</h1>
+<p class="subtitle">Mục tiêu bài học: giải thích được Triton làm việc gì, và tự tay chạy được một server inference <em>thật</em> trên chính máy này — không GPU, không Docker — kèm kiểm chứng tự động.</p>
+
+<div class="callout mission">
+  <span class="label">Gắn với mission của bạn</span>
+  Task của bạn là <strong>"startup scripts, inference smoke tests"</strong> trong vai trò MLOps — Serving &amp; Performance của dự án Cost-Aware GPU Scheduling. Bài này hoàn thành đúng 2 mục đó: một script khởi động (<code>serve.sh</code>) và một bộ smoke test. Toàn bộ benchmark/metrics sau này đều bắt đầu từ khả năng "bật server, xác nhận nó sống".
+</div>
+
+<h2>1. Triton làm gì? (3 phút)</h2>
+<p>Triton Inference Server là phần mềm phục vụ (serve) các model đã train xong: nó <strong>giữ model trong bộ nhớ, nhận request qua mạng, chạy inference, trả kết quả</strong> — và đo lường mọi thứ trên đường đi. Trong dự án của bạn, Triton chính là "cửa ngõ" mà mọi workload inference đi qua; bộ lập lịch GPU sau này sẽ dựa vào số liệu từ cửa ngõ này để ra quyết định.</p>
+
+<div class="diagram-card">
+  <div class="diagram-header">
+    <div class="diagram-title">
+      <span>📐</span> Sơ đồ kiến trúc &amp; luồng dữ liệu Triton Inference Server
+    </div>
+    <div class="diagram-tags">
+      <span class="d-tag d-tag-blue">3 Cổng chuẩn</span>
+      <span class="d-tag d-tag-green">Dynamic Batching</span>
+      <span class="d-tag d-tag-amber">Model Repo</span>
+    </div>
+  </div>
+
+  <div class="diagram-body">
+    <svg viewBox="0 0 740 450" width="100%" height="auto" class="triton-arch-svg" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <!-- Shadows -->
+        <filter id="card-shadow" x="-5%" y="-5%" width="110%" height="114%" filterUnits="userSpaceOnUse">
+          <feDropShadow dx="0" dy="2" stdDeviation="3" flood-opacity="0.06"/>
+        </filter>
+
+        <!-- Arrow Markers -->
+        <marker id="arrow-teal" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#0f6b5c"/>
+        </marker>
+        <marker id="arrow-blue" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#2563eb"/>
+        </marker>
+        <marker id="arrow-green" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#059669"/>
+        </marker>
+        <marker id="arrow-purple" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#7c3aed"/>
+        </marker>
+        <marker id="arrow-amber" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#d97706"/>
+        </marker>
+
+        <!-- Gradients -->
+        <linearGradient id="client-grad" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="#ffffff"/>
+          <stop offset="100%" stop-color="#f8fafc"/>
+        </linearGradient>
+        <linearGradient id="triton-bg" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="#fcfefd"/>
+          <stop offset="100%" stop-color="#f4f9f7"/>
+        </linearGradient>
+        <linearGradient id="server-badge" x1="0" y1="0" x2="1" y2="0">
+          <stop offset="0%" stop-color="#0f6b5c"/>
+          <stop offset="100%" stop-color="#115e59"/>
+        </linearGradient>
+        <linearGradient id="hw-grad" x1="0" y1="0" x2="1" y2="0">
+          <stop offset="0%" stop-color="#1a1a2e"/>
+          <stop offset="100%" stop-color="#2d2d44"/>
+        </linearGradient>
+      </defs>
+
+      <!-- ================= 1. CLIENT LAYER ================= -->
+      <g class="svg-group group-client" transform="translate(145, 14)">
+        <rect x="0" y="0" width="450" height="56" rx="10" fill="url(#client-grad)" stroke="#cbd5e1" stroke-width="1.5" filter="url(#card-shadow)"/>
+        <text x="225" y="21" text-anchor="middle" font-family="'Inter', sans-serif" font-size="11" font-weight="700" fill="#475569" letter-spacing="0.08em">CLIENT APPS &amp; WORKLOADS</text>
+        
+        <!-- Client Chips -->
+        <g transform="translate(25, 28)">
+          <!-- curl -->
+          <rect x="0" y="0" width="105" height="22" rx="4" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1"/>
+          <text x="12" y="15" font-family="'JetBrains Mono', monospace" font-size="11" font-weight="600" fill="#1e293b">curl</text>
+          <text x="52" y="15" font-family="'Inter', sans-serif" font-size="10" fill="#64748b">(REST)</text>
+
+          <!-- tritonclient -->
+          <rect x="120" y="0" width="150" height="22" rx="4" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1"/>
+          <text x="130" y="15" font-family="'JetBrains Mono', monospace" font-size="11" font-weight="600" fill="#1e293b">tritonclient</text>
+          <text x="216" y="15" font-family="'Inter', sans-serif" font-size="10" fill="#64748b">(Py/C++)</text>
+
+          <!-- perf_analyzer -->
+          <rect x="285" y="0" width="125" height="22" rx="4" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1"/>
+          <text x="294" y="15" font-family="'JetBrains Mono', monospace" font-size="10.5" font-weight="600" fill="#1e293b">perf_analyzer</text>
+        </g>
+      </g>
+
+      <!-- Flow Lines from Client to Ports -->
+      <!-- Left: Client to HTTP 8000 -->
+      <path d="M 230 70 L 230 92" stroke="#2563eb" stroke-width="1.8" stroke-dasharray="3 3" fill="none"/>
+      <!-- Center: Client to gRPC 8001 -->
+      <path d="M 400 70 L 400 92" stroke="#059669" stroke-width="1.8" stroke-dasharray="3 3" fill="none"/>
+      <!-- Right: Metrics Scraper connection to 8002 -->
+      <path d="M 570 70 L 570 92" stroke="#7c3aed" stroke-width="1.8" stroke-dasharray="3 3" fill="none"/>
+
+      <!-- ================= 2. PORTS / PROTOCOLS ================= -->
+      <!-- Port 1: HTTP 8000 -->
+      <g class="svg-group group-port" transform="translate(155, 92)">
+        <title>Cổng HTTP 8000: REST API, Health check (/v2/health/ready) và JSON inference</title>
+        <rect x="0" y="0" width="150" height="42" rx="8" fill="#eff6ff" stroke="#93c5fd" stroke-width="1.5" filter="url(#card-shadow)"/>
+        <circle cx="16" cy="21" r="5" fill="#3b82f6"/>
+        <text x="28" y="18" font-family="'Inter', sans-serif" font-size="11" font-weight="700" fill="#1e40af">HTTP · REST</text>
+        <text x="28" y="32" font-family="'JetBrains Mono', monospace" font-size="11" font-weight="600" fill="#2563eb">:8000</text>
+        <text x="75" y="32" font-family="'Inter', sans-serif" font-size="10" fill="#64748b">(V2 JSON, Health)</text>
+      </g>
+
+      <!-- Port 2: gRPC 8001 -->
+      <g class="svg-group group-port" transform="translate(325, 92)">
+        <title>Cổng gRPC 8001: Binary RPC hiệu năng cao cho client production &amp; streaming</title>
+        <rect x="0" y="0" width="150" height="42" rx="8" fill="#ecfdf5" stroke="#6ee7b7" stroke-width="1.5" filter="url(#card-shadow)"/>
+        <circle cx="16" cy="21" r="5" fill="#10b981"/>
+        <text x="28" y="18" font-family="'Inter', sans-serif" font-size="11" font-weight="700" fill="#065f46">gRPC Protocol</text>
+        <text x="28" y="32" font-family="'JetBrains Mono', monospace" font-size="11" font-weight="600" fill="#059669">:8001</text>
+        <text x="75" y="32" font-family="'Inter', sans-serif" font-size="10" fill="#64748b">(High-perf RPC)</text>
+      </g>
+
+      <!-- Port 3: Metrics 8002 -->
+      <g class="svg-group group-port" transform="translate(495, 92)">
+        <title>Cổng Metrics 8002: Prometheus scraper endpoint theo dõi throughput, latency, GPU/CPU</title>
+        <rect x="0" y="0" width="150" height="42" rx="8" fill="#f5f3ff" stroke="#c4b5fd" stroke-width="1.5" filter="url(#card-shadow)"/>
+        <circle cx="16" cy="21" r="5" fill="#8b5cf6"/>
+        <text x="28" y="18" font-family="'Inter', sans-serif" font-size="11" font-weight="700" fill="#5b21b6">Metrics</text>
+        <text x="28" y="32" font-family="'JetBrains Mono', monospace" font-size="11" font-weight="600" fill="#7c3aed">:8002</text>
+        <text x="75" y="32" font-family="'Inter', sans-serif" font-size="10" fill="#64748b">(Prometheus)</text>
+      </g>
+
+      <!-- Flow Lines from Ports into Triton Server Engine -->
+      <!-- HTTP into Triton -->
+      <path d="M 230 134 L 230 162" stroke="#2563eb" stroke-width="2" marker-end="url(#arrow-blue)" fill="none"/>
+      <!-- gRPC into Triton -->
+      <path d="M 400 134 L 400 162" stroke="#059669" stroke-width="2" marker-end="url(#arrow-green)" fill="none"/>
+      <!-- Metrics feedback up to Port 8002 -->
+      <path d="M 570 162 L 570 136" stroke="#7c3aed" stroke-width="2" marker-end="url(#arrow-purple)" fill="none"/>
+
+      <!-- ================= 3. TRITON SERVER BOX ================= -->
+      <rect x="15" y="166" width="710" height="268" rx="14" fill="url(#triton-bg)" stroke="#0f6b5c" stroke-width="2" filter="url(#card-shadow)"/>
+
+      <!-- Triton Header Badge -->
+      <g transform="translate(25, 154)">
+        <rect x="0" y="0" width="175" height="25" rx="6" fill="url(#server-badge)"/>
+        <text x="12" y="17" font-family="'Inter', sans-serif" font-size="11" font-weight="800" fill="#ffffff" letter-spacing="0.04em">⚡ TRITON SERVER</text>
+      </g>
+
+      <text x="705" y="181" text-anchor="end" font-family="'Inter', sans-serif" font-size="10" font-weight="600" fill="#0f6b5c" letter-spacing="0.04em">CORE SERVING ENGINE</text>
+
+      <!-- Sub-block 1: MODEL REPOSITORY (Left) -->
+      <g class="svg-group group-repo" transform="translate(30, 194)">
+        <title>Model Repository: Thư mục chứa cấu hình (config.pbtxt) và artifacts phiên bản model trên đĩa</title>
+        <rect x="0" y="0" width="205" height="224" rx="10" fill="#fffdfa" stroke="#fcd34d" stroke-width="1.5" filter="url(#card-shadow)"/>
+        
+        <!-- Header -->
+        <rect x="0" y="0" width="205" height="34" rx="10" fill="#fef3c7"/>
+        <path d="M 0 24 L 0 34 L 205 34 L 205 24 Z" fill="#fef3c7"/>
+        <text x="12" y="22" font-family="'Inter', sans-serif" font-size="12" font-weight="700" fill="#92400e">📁 model_repository/</text>
+        
+        <!-- Subtitle -->
+        <text x="12" y="49" font-family="'Inter', sans-serif" font-size="10" fill="#78350f" font-weight="600">Thư mục trên đĩa (Disk)</text>
+
+        <!-- Tree visual -->
+        <g transform="translate(12, 60)" font-family="'JetBrains Mono', monospace" font-size="11" fill="#292524">
+          <rect x="0" y="0" width="181" height="96" rx="6" fill="#fff" stroke="#fef08a" stroke-width="1"/>
+          <text x="10" y="20" font-weight="600" fill="#0f766e">identity_cpu/</text>
+          <text x="10" y="42" fill="#71717a">├── </text>
+          <text x="36" y="42" fill="#1c1917" font-weight="500">config.pbtxt</text>
+          <text x="10" y="62" fill="#71717a">└── </text>
+          <text x="36" y="62" fill="#0f766e" font-weight="600">1/</text>
+          <text x="56" y="62" font-size="10" fill="#a1a1aa">(version)</text>
+          <text x="36" y="82" fill="#71717a">    └── </text>
+          <text x="74" y="82" font-size="10" fill="#44403c">model.identity</text>
+        </g>
+
+        <!-- Startup load badge -->
+        <g transform="translate(12, 168)">
+          <rect x="0" y="0" width="181" height="42" rx="6" fill="#fef9c3" stroke="#fde047" stroke-width="1"/>
+          <text x="8" y="16" font-family="'Inter', sans-serif" font-size="10" font-weight="700" fill="#854d0e">🔄 Khởi động / Polling:</text>
+          <text x="8" y="32" font-family="'Inter', sans-serif" font-size="9.5" fill="#713f12">Nạp config &amp; weights vào RAM</text>
+        </g>
+      </g>
+
+      <!-- Arrow from Model Repo to Scheduler -->
+      <g transform="translate(235, 296)">
+        <path d="M 0 0 L 25 0" stroke="#d97706" stroke-width="2" marker-end="url(#arrow-amber)" fill="none"/>
+        <text x="12" y="-7" text-anchor="middle" font-family="'Inter', sans-serif" font-size="9" font-weight="700" fill="#b45309">LOAD</text>
+      </g>
+
+      <!-- Sub-block 2: SCHEDULER & DYNAMIC BATCHING (Center) -->
+      <g class="svg-group group-sched" transform="translate(265, 194)">
+        <title>Scheduler &amp; Dynamic Batching: Quản lý hàng đợi request theo từng model và tự động gom batch</title>
+        <rect x="0" y="0" width="235" height="224" rx="10" fill="#ffffff" stroke="#93c5fd" stroke-width="1.5" filter="url(#card-shadow)"/>
+        
+        <!-- Header -->
+        <rect x="0" y="0" width="235" height="34" rx="10" fill="#eff6ff"/>
+        <path d="M 0 24 L 0 34 L 235 34 L 235 24 Z" fill="#eff6ff"/>
+        <text x="12" y="22" font-family="'Inter', sans-serif" font-size="12" font-weight="700" fill="#1e40af">⚙️ Per-Model Scheduler</text>
+        <text x="12" y="49" font-family="'Inter', sans-serif" font-size="10" fill="#1e3a8a" font-weight="600">Hàng đợi riêng từng model</text>
+
+        <!-- Queue Visual -->
+        <g transform="translate(12, 58)">
+          <rect x="0" y="0" width="211" height="42" rx="6" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1"/>
+          <text x="8" y="14" font-family="'Inter', sans-serif" font-size="9" font-weight="700" fill="#475569" letter-spacing="0.04em">HÀNG ĐỢI REQUEST (QUEUE):</text>
+          <!-- Individual request items -->
+          <rect x="8" y="20" width="58" height="17" rx="3" fill="#dbeafe" stroke="#93c5fd"/>
+          <text x="12" y="32" font-family="'JetBrains Mono', monospace" font-size="9" fill="#1e40af">req₁ (1,4)</text>
+
+          <rect x="70" y="20" width="58" height="17" rx="3" fill="#dbeafe" stroke="#93c5fd"/>
+          <text x="74" y="32" font-family="'JetBrains Mono', monospace" font-size="9" fill="#1e40af">req₂ (1,4)</text>
+
+          <rect x="132" y="20" width="58" height="17" rx="3" fill="#e2e8f0" stroke="#cbd5e1"/>
+          <text x="144" y="32" font-family="'JetBrains Mono', monospace" font-size="9" fill="#64748b">req₃...</text>
+        </g>
+
+        <!-- Dynamic Batching Box -->
+        <g transform="translate(12, 108)">
+          <rect x="0" y="0" width="211" height="102" rx="6" fill="#f0fdf4" stroke="#86efac" stroke-width="1.2"/>
+          <rect x="8" y="8" width="136" height="18" rx="3" fill="#16a34a"/>
+          <text x="14" y="21" font-family="'Inter', sans-serif" font-size="10" font-weight="700" fill="#ffffff">⚡ DYNAMIC BATCHING</text>
+
+          <text x="8" y="42" font-family="'Inter', sans-serif" font-size="9.5" fill="#15803d" font-weight="600">Gộp request cùng thời điểm:</text>
+          
+          <!-- Batched Tensor representation -->
+          <rect x="8" y="48" width="195" height="24" rx="4" fill="#ffffff" stroke="#4ade80" stroke-width="1"/>
+          <text x="16" y="64" font-family="'JetBrains Mono', monospace" font-size="10" font-weight="700" fill="#166534">Batch Tensor: [N, 4]</text>
+
+          <text x="8" y="88" font-family="'Inter', sans-serif" font-size="9" fill="#166534">Tối đa hóa throughput GPU/CPU</text>
+        </g>
+      </g>
+
+      <!-- Arrow from Scheduler to Backends -->
+      <g transform="translate(500, 296)">
+        <path d="M 0 0 L 22 0" stroke="#0f6b5c" stroke-width="2.5" marker-end="url(#arrow-teal)" fill="none"/>
+        <text x="11" y="-7" text-anchor="middle" font-family="'Inter', sans-serif" font-size="9" font-weight="700" fill="#0f6b5c">BATCH</text>
+      </g>
+
+      <!-- Sub-block 3: BACKENDS & HARDWARE (Right) -->
+      <g class="svg-group group-backend" transform="translate(528, 194)">
+        <title>Framework Backends: ONNX Runtime, PyTorch, TensorRT hoặc Identity thực thi trên CPU/GPU</title>
+        <rect x="0" y="0" width="182" height="224" rx="10" fill="#ffffff" stroke="#c4b5fd" stroke-width="1.5" filter="url(#card-shadow)"/>
+        
+        <!-- Header -->
+        <rect x="0" y="0" width="182" height="34" rx="10" fill="#f5f3ff"/>
+        <path d="M 0 24 L 0 34 L 182 34 L 182 24 Z" fill="#f5f3ff"/>
+        <text x="12" y="22" font-family="'Inter', sans-serif" font-size="12" font-weight="700" fill="#5b21b6">🧠 BACKENDS</text>
+        <text x="12" y="49" font-family="'Inter', sans-serif" font-size="10" fill="#4c1d95" font-weight="600">Thực thi inference</text>
+
+        <!-- Framework Chips -->
+        <g transform="translate(10, 58)" font-family="'JetBrains Mono', monospace" font-size="10">
+          <!-- onnx -->
+          <rect x="0" y="0" width="162" height="20" rx="4" fill="#f8fafc" stroke="#cbd5e1"/>
+          <circle cx="10" cy="10" r="3" fill="#0284c7"/>
+          <text x="20" y="14" fill="#334155" font-weight="600">onnxruntime</text>
+
+          <!-- pytorch -->
+          <rect x="0" y="24" width="162" height="20" rx="4" fill="#f8fafc" stroke="#cbd5e1"/>
+          <circle cx="10" cy="10" r="3" fill="#ea580c"/>
+          <text x="20" y="38" fill="#334155" font-weight="600">pytorch (libtorch)</text>
+
+          <!-- tensorrt / python -->
+          <rect x="0" y="48" width="162" height="20" rx="4" fill="#f8fafc" stroke="#cbd5e1"/>
+          <circle cx="10" cy="10" r="3" fill="#16a34a"/>
+          <text x="20" y="62" fill="#334155" font-weight="600">tensorrt / python</text>
+
+          <!-- identity (active in this lesson) -->
+          <rect x="0" y="72" width="162" height="22" rx="4" fill="#e6f2ef" stroke="#0f6b5c" stroke-width="1.2"/>
+          <circle cx="10" cy="11" r="3" fill="#0f6b5c"/>
+          <text x="20" y="86" fill="#0f6b5c" font-weight="700">identity_cpu ★</text>
+        </g>
+
+        <!-- Hardware Execution Badge -->
+        <g transform="translate(10, 166)">
+          <rect x="0" y="0" width="162" height="44" rx="6" fill="url(#hw-grad)"/>
+          <text x="81" y="19" text-anchor="middle" font-family="'Inter', sans-serif" font-size="10" font-weight="700" fill="#34d399">💻 CPU  /  🚀 GPU</text>
+          <text x="81" y="34" text-anchor="middle" font-family="'Inter', sans-serif" font-size="9" fill="#cbd5e1">Hardware Execution</text>
+        </g>
+      </g>
+
+      <!-- Return path line / Metrics collector path -->
+      <!-- From Backend curving up to Metrics 8002 -->
+      <path d="M 619 194 C 619 175, 570 175, 570 162" stroke="#7c3aed" stroke-width="1.8" stroke-dasharray="3 3" fill="none"/>
+    </svg>
+  </div>
+
+  <div class="diagram-footer">
+    <div class="flow-step">
+      <span class="step-num">1</span>
+      <span><strong>Request vào:</strong> Client gửi request qua cổng <code>:8000</code> (HTTP REST) hoặc <code>:8001</code> (gRPC tốc độ cao).</span>
+    </div>
+    <div class="flow-step">
+      <span class="step-num">2</span>
+      <span><strong>Lập lịch &amp; Batch:</strong> <code>Scheduler</code> xếp hàng và kích hoạt <strong>Dynamic Batching</strong> gom nhiều request thành 1 batch tensor.</span>
+    </div>
+    <div class="flow-step">
+      <span class="step-num">3</span>
+      <span><strong>Thực thi &amp; Metrics:</strong> <code>Backend</code> tính toán với model đã nạp từ <code>model_repository/</code>, trả kết quả và cập nhật metrics (<code>:8002</code>).</span>
+    </div>
+  </div>
+</div>
+
+<p>Ba chi tiết kiến trúc cần nhớ từ <a href="https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/index.html">tài liệu chính thức</a>:</p>
+<ul>
+  <li><strong>Model repository</strong> — một thư mục trên đĩa, Triton đọc để biết serve model gì.</li>
+  <li><strong>Scheduler + backend</strong> — mỗi model có scheduler riêng (có thể gộp request thành batch), rồi đẩy cho backend tương ứng framework thực thi.</li>
+  <li><strong>Ba cổng chuẩn</strong> — HTTP <code>8000</code>, gRPC <code>8001</code>, Prometheus metrics <code>8002</code> (<a href="https://github.com/triton-inference-server/server/blob/main/docs/getting_started/quickstart.md">Quickstart</a>).</li>
+</ul>
+
+<h2>2. Giải phẫu model repository (5 phút)</h2>
+<p>Đây là repo thật đang nằm trong workspace của bạn — hãy mở và nhìn:</p>
+
+<pre><code>model_repository/
+└── identity_cpu/
+    ├── config.pbtxt        ← "hộ chiếu" của model
+    └── 1/                  ← thư mục phiên bản (bắt buộc, tên là SỐ NGUYÊN)
+        └── model.identity  ← file model (identity backend: file gì cũng được)</code></pre>
+
+<p>Quy tắc không thương lượng: <strong>mỗi model là một thư mục con, tên thư mục = tên model mà client sẽ gọi</strong>; bên trong phải có <code>config.pbtxt</code> và ít nhất một thư mục phiên bản đặt tên bằng số nguyên (<code>1</code>, <code>2</code>…). Đây là lý do phổ biến nhất khiến model load fail (<a href="https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/user_guide/model_repository.html">Model Repository guide</a>).</p>
+
+<p><code>config.pbtxt</code> tối thiểu cần: tên, backend, và chữ ký vào/ra (tên + datatype + dims). Mở file <code>model_repository/identity_cpu/config.pbtxt</code> và đối chiếu: model <code>identity</code> là model "gương" — trả về đúng input nó nhận. Hoàn hảo để học cơ chế mà không tốn công tính toán.</p>
+
+<h2>3. Hands-on: bật server &amp; smoke test (10 phút)</h2>
+<p>Mở <strong>hai terminal</strong> trong thư mục workspace. Terminal 1 chạy server, terminal 2 bắn test.</p>
+
+<h3>Bước 0 — Cài đặt (đã cài sẵn, script idempotent)</h3>
+<pre><code><span class="term-prompt"></span>./setup_triton_cpu.sh</code></pre>
+<p class="output" style="font-size:.88rem">Nếu đã cài (máy này rồi) → mọi dòng in "đã có, bỏ qua". Chi tiết bản cài không Docker: <a href="../reference/0001-triton-cpu-no-docker.html">REF 0001</a>.</p>
+
+<h3>Bước 1 — Khởi động server (Terminal 1)</h3>
+<pre><code><span class="term-prompt"></span>./serve.sh</code></pre>
+<p>Kiểm tra feedback ngay trên log — bảng trạng thái model phải hiện <strong><code>READY</code></strong>, và ba dòng "Started … Service" xuất hiện:</p>
+<pre class="output">+--------------+---------+--------+
+| Model        | Version | Status |
++--------------+---------+--------+
+| identity_cpu | 1       | READY  |
++--------------+---------+--------+
+... Started HTTPService at 0.0.0.0:8000
+... Started GRPCInferenceService at 0.0.0.0:8001
+... Started Metrics Service at 0.0.0.0:8002</pre>
+<div class="callout warn">
+  <span class="label">Nếu FAIL</span>
+  Đừng đọc lan man — Triton luôn ghi reason ở dòng <code>failed to load ... : &lt;lý do&gt;</code>. Soi bảng xử lý lỗi trong <a href="../reference/0001-triton-cpu-no-docker.html#bảng-xử-lý-lỗi">REF 0001</a>.
+</div>
+
+<h3>Bước 2 — Health check (Terminal 2)</h3>
+<pre><code><span class="term-prompt"></span>curl -s -o /dev/null -w "%{http_code}\n" localhost:8000/v2/health/ready</code></pre>
+<p class="output"><strong>200</strong> — đúng nghĩa "server sống, mọi model READY". Mã khác 200 = chưa sẵn sàng. Đây là endpoint Kubernetes sau này sẽ dùng làm readinessProbe.</p>
+
+<h3>Bước 3 — Inference thật (giao thức KServe V2)</h3>
+<pre><code><span class="term-prompt"></span>curl -s -X POST localhost:8000/v2/models/identity_cpu/infer \
+  -H "Content-Type: application/json" \
+  -d '{"inputs":[{"name":"INPUT0","shape":[1,4],"datatype":"FP32","data":[1,2,3,4]}],"outputs":[{"name":"OUTPUT0"}]}'</code></pre>
+<pre class="output">{"model_name":"identity_cpu","model_version":"1","outputs":[{"name":"OUTPUT0","datatype":"FP32","shape":[1,4],"data":[1.0,2.0,3.0,4.0]}]}</pre>
+<p>Soi feedback: <code>data</code> trả về <strong>đúng bằng input bạn gửi</strong> — model gương đang phản chiếu. Đổi <code>[1,2,3,4]</code> thành <code>[9,8,7,6]</code> và chạy lại để tự xác nhận cơ chế.</p>
+
+<h3>Bước 4 — Metrics (chốt smoke test)</h3>
+<pre><code><span class="term-prompt"></span>curl -s localhost:8002/metrics | grep nv_inference_request_success</code></pre>
+<pre class="output">nv_inference_request_success{model="identity_cpu",version="1"} 1</pre>
+<p>Con số <code>1</code> = đúng 1 request thành công (bước 3). Gọi inference thêm 2 lần rồi curl lại — số phải tăng thành 3. Bạn vừa <strong>xác nhận được vòng đời đầy đủ: request → model → metrics</strong>, chính là data pipeline bạn sẽ tổng hợp làm báo cáo.</p>
+
+<ul class="checklist">
+  <li>Bảng trạng thái hiện READY + 3 dòng "Started … Service"</li>
+  <li><code>/v2/health/ready</code> trả 200</li>
+  <li>Inference trả đúng dữ liệu gửi vào</li>
+  <li><code>nv_inference_request_success</code> đếm đúng số request</li>
+</ul>
+<p>Ba của bốn mục trên ✅ = smoke test <strong>PASS</strong>. Đây chính là định nghĩa "server chạy được" bạn sẽ dùng trong mọi buổi demo với team.</p>
+
+<div class="quiz" data-quiz-id="lesson0001"></div>
+
+<h2>Đọc sâu hơn (nguồn chính)</h2>
+<ul>
+  <li><strong>Nguồn chính của bài này:</strong> <a href="https://github.com/triton-inference-server/server/blob/main/docs/getting_started/quickstart.md">Triton Quickstart chính thức</a> — đọc phần "Verify Triton Is Running Correctly" và "Send an Inference Request" (10 phút).</li>
+  <li>Công thức cài không Docker của máy này: <a href="../reference/0001-triton-cpu-no-docker.html">REF 0001 — Triton CPU không Docker</a>.</li>
+</ul>
+
+<div class="callout tip">
+  <span class="label">Đừng học một mình</span>
+  Bất kỳ bước nào chưa rõ — log khó hiểu, thuật ngữ lạ, vì sao phải dùng <code>shape:[1,4]</code> — hãy <strong>quay lại chat và hỏi thầy (agent)</strong>. Mọi câu hỏi của bạn đều được ghi nhận để điều chỉnh bài sau.
+</div>
+
+<div class="callout tip">
+  <span class="label">Bài tiếp theo sẽ là gì?</span>
+  Sau khi smoke test pass: viết <code>config.pbtxt</code> cho model <strong>ONNX thật</strong> (không phải model gương) — nền của phần "Model repository/configuration" trong task. Nếu bạn muốn đổi hướng, cứ nói với thầy.
+</div>
+
+<div class="lesson-nav">
+  <span>← Bài trước: chưa có</span>
+  <span>Bài sau: 0002 — ONNX thật &amp; config.pbtxt (sắp ra)</span>
+</div>
+
+<script>
+window.QUIZZES = window.QUIZZES || {};
+window.QUIZZES["lesson0001"] = [
+  {
+    q: "Cổng nào phục vụ Prometheus metrics?",
+    opts: ["8000", "8001", "8002"],
+    answer: 2,
+    explain: "Ba cổng chuẩn: 8000 HTTP, 8001 gRPC, 8002 metrics. Mẹo nhớ: 0-HTTP, 1-gRPC, 2-metrics (theo Quickstart chính thức)."
+  },
+  {
+    q: "Server sẵn sàng thì endpoint /v2/health/ready trả mã nào?",
+    opts: ["200", "404", "500"],
+    answer: 0,
+    explain: "200 = sẵn sàng; mã khác 200 = chưa. Kubernetes sẽ dùng chính endpoint này làm readinessProbe."
+  },
+  {
+    q: "File nào khai báo chữ ký vào/ra của model?",
+    opts: ["config.pbtxt", "metrics.json", "version.info"],
+    answer: 0,
+    explain: "config.pbtxt khai báo name, backend, input/output (tên + datatype + dims). model.onnx chỉ là trọng số; file version không tồn tại."
+  },
+  {
+    q: "Thành phần nào thực thi model thực sự trong Triton?",
+    opts: ["backend", "frontend", "scheduler"],
+    answer: 0,
+    explain: "Scheduler nhận + có thể gộp request thành batch, rồi đẩy cho backend — backend mới là nơi chạy framework (onnx, pytorch…). Xem kiến trúc trong docs chính thức."
+  }
+];
+</script>
+<script src="../assets/quiz.js"></script>
+</main>
+</body>
+</html>

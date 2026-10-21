@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>REF 0001 — Chạy Triton CPU không cần Docker</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<main>
+<p class="meta-line">REFERENCE 0001 · Triton Serving &amp; Performance · xác minh 21/10/2026</p>
+<h1>Chạy Triton Inference Server CPU-only, không Docker</h1>
+<p class="subtitle">Công thức đã chạy thành công trên Ubuntu 24.04 (glibc 2.39) với Triton 2.73.0 (nv26.09) — không GPU, không Docker daemon, ~2.1GB disk.</p>
+
+<h2>Nguồn chính thức</h2>
+<ul>
+  <li>Server zip: <a href="https://github.com/triton-inference-server/server/releases">GitHub Releases — triton-inference-server/server</a> (từ ~v2.64.0; nội dung zip = thư mục <code>/opt/tritonserver</code> trong container)</li>
+  <li><a href="https://github.com/triton-inference-server/server/blob/main/docs/getting_started/quickstart.md">Quickstart chính thức</a> — xác nhận Triton chạy được CPU-only, cùng image với bản GPU</li>
+</ul>
+
+<h2>4 dependency &amp; vai trò</h2>
+<table>
+  <thead><tr><th>Thành phần</th><th>Nguồn tải</th><th>Vì sao cần</th></tr></thead>
+  <tbody>
+    <tr><td><code>tritonserver-*-x86_64.zip</code> (~1.1GB)</td><td>GitHub Releases</td><td>Server + backends (identity, onnxruntime, pytorch, python, tensorrt…)</td></tr>
+    <tr><td><code>libssl3t64</code> ≥ 3.4 (deb)</td><td>pool Ubuntu</td><td>Build Triton 26.09 cần symbol <code>OPENSSL_3.4.0</code>; Ubuntu 24.04 mặc định có OpenSSL 3.0</td></tr>
+    <tr><td><code>datacenter-gpu-manager-4-core</code> 4.6.1-1 (deb)</td><td>NVIDIA cuda repo</td><td>Triton link cứng <code>libdcgm.so.4</code> (GPU metrics); không cần driver GPU</td></tr>
+    <tr><td><code>nvidia-cuda-runtime</code> + <code>nvidia-cuda-cupti</code> (wheels)</td><td><code>pypi.nvidia.com</code></td><td><code>libcudart.so.13</code>, <code>libcupti.so.13</code> — zip chỉ chứa <code>libtritonserver.so</code>, CUDA libs lấy từ môi trường</td></tr>
+  </tbody>
+</table>
+
+<h2>Cài nhanh (script đã có sẵn trong workspace)</h2>
+<pre><code><span class="term-prompt"></span>./setup_triton_cpu.sh      <span style="color:#8a8aa0"># tải + giải nén toàn bộ vào ~/.triton-cpu</span>
+./serve.sh                 <span style="color:#8a8aa0"># khởi động server với model_repository/</span></code></pre>
+
+<h2>Khởi động thủ công (hiểu từng thành phần)</h2>
+<pre><code><span class="term-prompt"></span>export LD_LIBRARY_PATH=\
+$HOME/.triton-cpu/ssl_extract/usr/lib/x86_64-linux-gnu:\
+$HOME/.triton-cpu/triton_dist/tritonserver/lib64:\
+$HOME/.triton-cpu/cuda_libs/nvidia/cu13/lib:\
+$HOME/.triton-cpu/dcgm_extract/usr/lib/x86_64-linux-gnu
+
+<span class="term-prompt"></span>$HOME/.triton-cpu/triton_dist/tritonserver/bin/tritonserver \
+  --model-repository=./model_repository \
+  --backend-directory=$HOME/.triton-cpu/triton_dist/tritonserver/backends \
+  --http-port 8000 --grpc-port 8001 --metrics-port 8002</code></pre>
+
+<h2>3 cổng chuẩn (nhớ bằng: 0-HTTP, 1-gRPC, 2-metrics)</h2>
+<table>
+  <thead><tr><th>Cổng</th><th>Giao thức</th><th>Dùng cho</th></tr></thead>
+  <tbody>
+    <tr><td>8000</td><td>HTTP/REST</td><td>Inference + health + model management</td></tr>
+    <tr><td>8001</td><td>gRPC</td><td>Inference hiệu năng cao (client production)</td></tr>
+    <tr><td>8002</td><td>Prometheus</td><td>Runtime metrics — scrape bởi Prometheus/Grafana</td></tr>
+  </tbody>
+</table>
+
+<h2>Smoke test 3 bước</h2>
+<pre><code><span class="term-prompt"></span>curl -s -o /dev/null -w "%{http_code}" localhost:8000/v2/health/ready
+<span style="color:#196b3d">200</span>
+
+<span class="term-prompt"></span>curl -s -X POST localhost:8000/v2/models/identity_cpu/infer \
+  -H "Content-Type: application/json" \
+  -d '{"inputs":[{"name":"INPUT0","shape":[1,4],"datatype":"FP32","data":[1,2,3,4]}],"outputs":[{"name":"OUTPUT0"}]}'
+{"model_name":"identity_cpu","model_version":"1",...,"data":[1.0,2.0,3.0,4.0]}
+
+<span class="term-prompt"></span>curl -s localhost:8002/metrics | grep nv_inference_request_success
+nv_inference_request_success{model="identity_cpu",version="1"} 1</code></pre>
+
+<h2>Bảng xử lý lỗi khi khởi động (đã gặp thật)</h2>
+<table>
+  <thead><tr><th>Thông báo lỗi</th><th>Thiếu gì</th><th>Khắc phục</th></tr></thead>
+  <tbody>
+    <tr><td><code>cannot open shared object file: libcudart.so.13</code></td><td>CUDA 13 runtime</td><td><code>pip install --target ... --index-url https://pypi.nvidia.com nvidia-cuda-runtime</code></td></tr>
+    <tr><td><code>version 'OPENSSL_3.4.0' not found</code></td><td>OpenSSL ≥ 3.4</td><td>Giải nén deb <code>libssl3t64</code> (Ubuntu 25.04 pool) vào LD_LIBRARY_PATH</td></tr>
+    <tr><td><code>cannot open shared object file: libdcgm.so.4</code></td><td>DCGM 4.x</td><td>deb <code>datacenter-gpu-manager-4-core</code> từ cuda repo</td></tr>
+    <tr><td><code>unable to load shared library: libcupti.so.13</code></td><td>CUPTI (profiling)</td><td>wheel <code>nvidia-cuda-cupti</code> từ pypi.nvidia.com</td></tr>
+    <tr><td><code>UNAVAILABLE: failed to load all models</code></td><td>(sau khi fix lib)</td><td>Đọc kỹ dòng <code>failed to load '...' version 1: ...</code> — luôn có reason</td></tr>
+  </tbody>
+</table>
+
+<div class="callout warn">
+  <span class="label">Hạn chế đã biết</span>
+  Không có GPU → GPU metrics trống, pinned memory bị tắt (warning <code>CUDA driver version is insufficient</code> là bình thường). Python backend cần Python 3.12 (stub build cp312). Model TensorRT không chạy được trên CPU.
+</div>
+
+<div class="lesson-nav">
+  <a href="../lessons/0001-triton-architecture-and-first-smoke-test.html">← Bài 0001</a>
+  <span>REF 0001 · in ra dán cạnh màn hình</span>
+</div>
+</main>
+</body>
+</html>
