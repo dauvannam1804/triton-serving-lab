@@ -14,6 +14,7 @@
 
 ## Preferences
 - Bài học tiếng Việt, thuật ngữ kỹ thuật giữ tiếng Anh.
+- Repo GitHub public: https://github.com/dauvannam1804/triton-serving-lab (tên do tôi đặt, Nam认可). docx nhóm bị .gitignore. Lessons từ giờ phải đạt chất lượng "public portfolio".
 
 ## Open questions cho session sau
 - Model cụ thể dự án sẽ serve (PyTorch .pt tự train hay model công khai)? Ảnh hưởng bài ONNX vs PyTorch backend.
