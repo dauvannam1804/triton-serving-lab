@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bài 0004 — Prometheus metrics &amp; báo cáo cho team</title>
+<link rel="stylesheet" href="../assets/style.css">
+<style>.term-prompt::before{content:"$ ";}</style>
+</head>
+<body>
+<main>
+<p class="meta-line">BÀI 0004 · Triton Serving &amp; Performance · ~30 phút · hands-on trên máy bạn</p>
+<h1>Prometheus metrics &amp; báo cáo cho team</h1>
+<p class="subtitle">Mục tiêu bài học: đọc thành thạo metrics endpoint của Triton, <strong>thu thập metrics trong lúc có tải</strong>, đối chiếu hai nguồn độc lập (perf_analyzer ↔ metrics) và tổng hợp tất cả thành một bản báo cáo Markdown mà team scheduling lấy đi dùng ngay.</p>
+
+<div class="callout mission">
+  <span class="label">Gắn với mission của bạn</span>
+  Bài này hoàn thành nốt 2 mục tiêu còn lại của MISSION.md: "Thu thập runtime metrics từ Prometheus endpoint" và "Đóng gói logs + tổng hợp kết quả benchmark thành báo cáo cho team". Cuối bài bạn sẽ có file <code>reports/0001-cpu-baseline-onnx-linear.md</code> — sản phẩm đầu tiên thực sự "giao cho người khác".
+</div>
+
+<h2>1. Đọc được cổng <code>:8002/metrics</code> (5 phút)</h2>
+<p>Prometheus text format chỉ là các dòng <code>tên_metric{label} giá_trị</code>. Hai "loài" cần phân biệt vì cách xử lý khác nhau:</p>
+<table>
+  <thead><tr><th>Loài</th><th>Đặc điểm</th><th>Cách dùng</th></tr></thead>
+  <tbody>
+    <tr><td><strong>Counter</strong></td><td>Chỉ tăng dần, không giảm (trừ khi restart)</td><td>Lấy <em>hiệu số</em> giữa 2 lần đọc → tốc độ thật trong khoảng đo (req/s, µs đã tiêu tốn…)</td></tr>
+    <tr><td><strong>Gauge</strong></td><td>Lên xuống tự do</td><td>Nhìn <em>giá trị tức thời</em> / avg / max trong khoảng đo</td></tr>
+  </tbody>
+</table>
+<p>Các metric của Triton đã kiểm chứng trên endpoint này (curl và liệt kê):</p>
+<table>
+  <thead><tr><th>Metric</th><th>Loài</th><th>Nó nói gì về hiệu năng</th></tr></thead>
+  <tbody>
+    <tr><td><code>nv_inference_request_success</code> / <code>_failure</code></td><td>counter</td><td>Số request thành công/thất bại — độ tin cậy cơ bản, nguyên liệu tính error rate</td></tr>
+    <tr><td><code>nv_inference_count</code> vs <code>nv_inference_exec_count</code></td><td>counter</td><td>Request vs lần thực thi. Chênh 2 số = batching đang gộp (bài 0002 đã chứng minh)</td></tr>
+    <tr><td><code>nv_inference_queue_duration_us</code></td><td>counter</td><td>Tổng µs request đã chờ trong queue — <strong>chỉ báo nút thắt số 1</strong> khi tăng tải</td></tr>
+    <tr><td><code>nv_inference_compute_infer_duration_us</code></td><td>counter</td><td>Tổng µs model thực sự tính toán — phần "đáng tiền"</td></tr>
+    <tr><td><code>nv_inference_pending_request_count</code></td><td>gauge</td><td>Request đang chờ tại một thời điểm. &gt; 0 kéo dài = server không theo kịp tải</td></tr>
+    <tr><td><code>nv_cpu_utilization</code></td><td>gauge</td><td>CPU của tiến trình server — so sánh tương đối giữa các mức tải</td></tr>
+    <tr><td><code>DCGM_FI_DEV_GPU_UTIL</code>, <code>DCGM_FI_DEV_MEM_COPY_UTIL</code>…</td><td>gauge</td><td><strong>Chỉ xuất hiện khi có GPU</strong> (qua DCGM). Máy CPU-only này không có — sẽ gặp ở bài 0005</td></tr>
+  </tbody>
+</table>
+
+<h2>2. Thu thập <em>trong lúc có tải</em> — workflow 2 terminal (8 phút)</h2>
+<p>Metrics tĩnh thì vô dụng; thứ bạn cần là metrics <strong>song song với tải</strong>. Script <code>scripts/collect_metrics.py</code> (stdlib thuần, không cần cài gì) scrape endpoint mỗi 0.5s trong <code>--duration</code> giây, ghi CSV thô và in tóm tắt. Terminal 1 tạo tải, terminal 2 thu thập:</p>
+<pre><code><span class="term-prompt"></span>./scripts/bench.sh -m onnx_linear --concurrency-range 4 --measurement-interval 6000   # terminal 1
+<span class="term-prompt"></span>python3 scripts/collect_metrics.py --duration 15 --out reports/metrics_c4.csv          # terminal 2</code></pre>
+<p>Tóm tắt thật đo trên máy này (15 giây, trong lúc perf_analyzer chạy c=4):</p>
+<pre class="output">Đã ghi 30 samples → reports/metrics_c4.csv
+
+== TÓM TẮT (14.5s) ==
+nv_inference_exec_count                       Δ        31936  (      2199/s)
+nv_inference_count                            Δ        31936  (      2199/s)
+nv_inference_request_duration_us              Δ      7275578  (    500934/s)
+nv_inference_request_success                  Δ        31936  (      2199/s)
+nv_inference_compute_infer_duration_us        Δ       316471  (     21789/s)
+nv_inference_queue_duration_us                Δ      6163993  (    424400/s)
+nv_inference_request_failure                  Δ            0  (         0/s)
+nv_cpu_utilization                            avg      0.282  max      0.339
+nv_inference_pending_request_count            avg      0.400  max      1.000</pre>
+<p>Đọc tóm tắt như một MLOps engineer:</p>
+<ul>
+  <li><strong>2199 req/s, 0 failure</strong> — tải chạy sạch.</li>
+  <li><strong>queue Δ6.16s vs compute Δ0.32s</strong> — tính gọn: mỗi request chờ ~193µs nhưng chỉ tính ~10µs. <em>95% thời gian server dành để xếp hàng.</em></li>
+  <li><strong>pending max = 1</strong> — hàng đợi gần như rỗng mọi thời điểm: server theo kịp thoải mái, chưa tới ngưỡng bão hòa.</li>
+  <li><strong>exec = count</strong> — ở cửa sổ này batcher gần như không gộp (avg batch 1.0). Nhớ lại bài 0003: cùng config nhưng c=8 gộp được ~2.5 — <em>mức tải quyết định hành vi batcher</em>, không phải config một mình.</li>
+</ul>
+<div class="callout tip">
+  <span class="label">Cross-validation — thói quen của người làm số liệu tin cậy</span>
+  So sánh: perf_analyzer (mục 3, bài 0003) báo server-side queue ~200µs/request — metrics Prometheus cũng cho ~193µs/request. <strong>Hai nguồn độc lập, cùng một câu chuyện.</strong> Khi hai nguồn lệch nhau, đó là lúc phải điều tra (clock skew? nguồn đo khác chiều?…). Trong báo cáo gửi team, luôn ghi rõ số đến từ nguồn nào.
+</div>
+
+<h2>3. Tổng hợp thành báo cáo (7 phút)</h2>
+<p>Từ CSV benchmark (bài 0003) + CSV metrics (vừa tạo), script <code>scripts/make_report.py</code> dựng báo cáo Markdown hoàn chỉnh:</p>
+<pre><code><span class="term-prompt"></span>python3 scripts/make_report.py \
+  --title "CPU baseline — onnx_linear (8 core, không Docker)" \
+  --perf reports/bench_c1.csv reports/bench_c8.csv \
+  --metrics reports/metrics_c4.csv \
+  --out reports/0001-cpu-baseline-onnx-linear.md</code></pre>
+<p>Sản phẩm (trích — file đầy đủ trong <code>reports/</code>):</p>
+<pre class="output">## Benchmark (perf_analyzer)
+
+| Kịch bản | Concurrency | Throughput (infer/s) | p50 (µs) | p90 (µs) | p95 (µs) | p99 (µs) |
+|---|---|---|---|---|---|---|
+| bench_c1 | 1 | 2,266 | 414 | 480 | 508 | 1,032 |
+| bench_c8 | 8 | 14,731 | 446 | 747 | 1,017 | 2,144 |
+
+## Runtime metrics (30 samples / 15s, trong lúc có tải)
+
+| Metric | Loại | Giá trị |
+|---|---|---|
+| `nv_inference_queue_duration_us` | counter | Δ 6,163,993 (424,400/s) |
+| `nv_inference_compute_infer_duration_us` | counter | Δ 316,471 (21,789/s) |
+| `nv_inference_pending_request_count` | gauge | avg 0.400 · max 1.000 |
+| `nv_cpu_utilization` | gauge | avg 0.282 · max 0.339 |</pre>
+<p>Phần <strong>Kết luận</strong> trong báo cáo là việc của bạn — vài gợi ý viết cho báo cáo này: model nhỏ bị queue-dominated nên config batch "hiền" là hợp lý; throughput gần tuyến tính tới c≈4 rồi bão hòa ~14.7k infer/s tại c=8 trên 8 core CPU; đây là <em>baseline</em> để so khi chuyển GPU. Trước khi gửi, tự hỏi: người đọc (member scheduling) cần quyết định gì từ con số này? Bỏ mọi số không phục vụ quyết định đó.</p>
+
+<div class="callout warn">
+  <span class="label">Vì sao không cài Prometheus server luôn?</span>
+  Prometheus server + Grafana là chuyện <em>hạ tầng monitoring</em> — làm tốt khi đã có Kubernetes (giai đoạn sau của dự án). Ở giai đoạn học, scrape kiểu pull bằng script nhỏ đủ để trả lời mọi câu hỏi benchmark, không tốn công vận hành. Endpoint dạng text của Triton vốn tương thích sẵn — khi dựng cluster, chỉ cần trỏ Prometheus server scrape vào <code>:8002/metrics</code> là xong.
+</div>
+
+<h2>4. Checklist giao hàng</h2>
+<ul class="checklist">
+  <li>Liệt kê được ≥ 5 metric nv_* và nói đúng loài (counter/gauge) + ý nghĩa</li>
+  <li>Chạy được collector song song với tải, đọc được tóm tắt delta/avg/max</li>
+  <li>Chỉ ra được queue vs compute ratio từ metrics và đối chiếu với perf_analyzer</li>
+  <li><code>reports/0001-*.md</code> tồn tại, có bảng benchmark + metrics + phần kết luận do bạn viết</li>
+</ul>
+
+<div class="quiz" data-quiz-id="lesson0004"></div>
+
+<h2>Đọc sâu hơn (nguồn chính)</h2>
+<ul>
+  <li><a href="https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/user_guide/metrics.html">Triton Metrics guide</a> — bảng metric đầy đủ, gồm cả GPU metrics qua DCGM (10 phút).</li>
+  <li><a href="https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/user_guide/metrics.html#grpc-network-metrics">Phần HTTP/gRPC metrics</a> — đếm byte/network khi bạn cần soi serialization overhead.</li>
+</ul>
+
+<div class="callout tip">
+  <span class="label">Bài tiếp theo sẽ là gì?</span>
+  Bạn đã có pipeline hoàn chỉnh trên CPU. Bài 0005 mở chân trời: chạy cùng pipeline đó trên <strong>GPU thật (Colab T4)</strong>, thu DCGM metrics (GPU util), và so CPU vs GPU theo đúng ngôn ngữ của dự án: <em>cost-aware</em> — hiệu năng trên mỗi đồng chi phí.
+</div>
+
+<div class="lesson-nav">
+  <a href="0003-perf-analyzer-benchmark.html">← Bài 0003: perf_analyzer</a>
+  <a href="0005-gpu-path-colab-benchmark.html">Bài 0005: GPU path (Colab) →</a>
+</div>
+
+<script>
+window.QUIZZES = window.QUIZZES || {};
+window.QUIZZES["lesson0004"] = [
+  {
+    q: "Muốn biết server có đang bão hòa (không theo kịp tải) không, metric nào nhìn trực tiếp nhất?",
+    opts: ["nv_inference_pending_request_count", "nv_model_load_duration_secs", "nv_inference_request_success"],
+    answer: 0,
+    explain: "pending_request_count là gauge cho số request đang chờ tại một thời điểm. Nếu nó liên tục > 0 thì hàng đợi không kịp tiêu — server quá tải. request_success chỉ cho biết tổng số đã xử lý."
+  },
+  {
+    q: "Để tính throughput (req/s) trong 1 phút vừa qua từ Prometheus metrics, bạn làm gì với nv_inference_request_success?",
+    opts: ["Lấy giá trị cuối trừ giá trị đầu, chia 60", "Lấy giá trị trung bình", "Lấy giá trị max"],
+    answer: 0,
+    explain: "request_success là counter (chỉ tăng) — tốc độ thật = hiệu số 2 mốc / khoảng thời gian. Giá trị tức thời của counter là tổng tích lũy từ lúc restart, không phải tốc độ."
+  },
+  {
+    q: "queue_duration_us Δ 6.16s và compute_infer_duration_us Δ 0.32s trong 15s — hệ thống đang bị gì?",
+    opts: ["Queue-dominated: chờ xếp hàng nhiều gấp ~19 lần thời gian tính toán", "Model tính quá chậm", "Hết bộ nhớ"],
+    answer: 0,
+    explain: "Tổng thời gian chờ queue lớn gấp ~19 lần tổng thời gian compute → nút thắt nằm ở việc xếp hàng/gom batch, không phải model. Với model nhỏ là bình thường; với model nặng mà thấy tỉ lệ này thì cần xem lại instance/throughput."
+  },
+  {
+    q: "nv_inference_count = 5000 nhưng nv_inference_exec_count = 2000 trên cùng khoảng — ý nghĩa?",
+    opts: ["Batcher gộp trung bình 2.5 request mỗi lần thực thi", "3000 request bị mất", "Model chạy 2.5 lần cho mỗi request"],
+    answer: 0,
+    explain: "count đếm request, exec_count đếm lần model thực thi (1 batch = 1 execution). Chênh lệch chính là hiệu ứng dynamic batching — cùng cách chứng minh bạn đã làm ở bài 0002."
+  },
+  {
+    q: "Máy CPU-only này không thấy DCGM_FI_DEV_GPU_UTIL trong /metrics vì sao?",
+    opts: ["GPU metrics chỉ xuất hiện khi có GPU (qua DCGM)", "Triton chưa bật metrics", "Cần cài thêm Prometheus"],
+    answer: 0,
+    explain: "DCGM_* metrics do DCGM thu từ driver GPU; không GPU thì không có gì để báo. Trên Colab T4 (bài 0005) các metric này sẽ xuất hiện ngay trên cùng endpoint :8002/metrics."
+  }
+];
+</script>
+<script src="../assets/quiz.js"></script>
+</main>
+</body>
+</html>

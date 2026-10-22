@@ -44,4 +44,5 @@ Cost-Aware GPU Scheduling. Mọi URL dưới đây đã được fetch/xác minh
 
 - **Chưa có notebook chính thức chạy Triton server ngay trên VM Colab** (đã kiểm tra tutorials repo + server repo: không có). Các hướng khả thi: build từ source `--no-container-build` (một walkthrough CSDN r23.10 đã proven), hoặc zip release (bị chặn nếu driver Colab < r580 vì build CUDA 13). Quyết định sau khi probe `!nvidia-smi` trên Colab.
 - **Python backend bản cài CPU này**: stub build cho cp312 (Python 3.12), máy có Python 3.13 → backend python có thể không chạy local. Chưa xác minh. Nếu cần Python backend → dùng Docker CPU hoặc xử lý sau.
-- **perf_analyzer**: nằm trong `tritonserver_sdk` zip (0.46GB, cùng releases page) — chưa tải, sẽ tải khi tới bài benchmark.
+- **perf_analyzer**: ✅ ĐÃ VERIFY 22/10/2026 — nằm trong `tritonserver_sdk-2.73.0+nv26.09-cu132-cp312-manylinux_2_34-x86_64.zip` (458MB, cùng releases page), binary link tĩnh chạy được CPU-only, chỉ cần extract thư mục `install/` (~550MB). Script: `setup_perf_analyzer.sh`, wrapper `scripts/bench.sh`. Lưu ý CLI bản 2.73: `-f` chỉ xuất CSV (không có `--report-format`); `-c N` là option deprecated nghĩa "quét 1→N", khác `--concurrency-range N` (fixed).
+- **Colab path GPU**: chưa verify — notebook probe-ready ở `colab/0005-triton-gpu-t4.ipynb` (bước 0 probe driver ≥ r580 trước khi rẽ nhánh).

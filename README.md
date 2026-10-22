@@ -47,23 +47,29 @@ Ba cổng chuẩn: **8000** HTTP · **8001** gRPC · **8002** Prometheus metrics
 ## Cấu trúc
 
 ```
-├── lessons/          # bài học (HTML, quiz tương tác)
+├── lessons/          # 5 bài học (HTML, quiz tương tác)
 ├── reference/        # cheat sheet in được
 ├── assets/           # stylesheet + quiz widget dùng chung
+├── colab/            # notebook GPU (bài 0005 — T4 trên Colab)
 ├── model_repository/ # model repo của Triton (config.pbtxt + version dirs)
+├── scripts/          # make_onnx_model · burst_requests · collect_metrics · make_report · bench.sh
+├── reports/          # benchmark CSV + báo cáo Markdown cho team
 ├── serve.sh          # startup script
 ├── setup_triton_cpu.sh
+├── setup_perf_analyzer.sh   # cài perf_analyzer (SDK zip, chỉ extract install/)
 ├── MISSION.md        # mục tiêu học tập
 └── RESOURCES.md      # nguồn đã xác minh
 ```
 
 ## Lộ trình
 
-- [x] **0001** — Kiến trúc Triton + smoke test đầu tiên (CPU, không Docker)
-- [ ] **0002** — ONNX thật + `config.pbtxt` (dynamic batching, instances)
-- [ ] **0003** — `perf_analyzer`: benchmark throughput/latency (p50/p99)
-- [ ] **0004** — Thu thập Prometheus metrics + tổng hợp báo cáo
-- [ ] **0005** — Path GPU (Colab/cloud) + benchmark GPU thật
+- [x] **0001** — Kiến trúc Triton + smoke test đầu tiên (CPU, không Docker) *(đã học)*
+- [ ] **0002** — ONNX thật + `config.pbtxt` (dynamic batching, instances) *(đã có bài)*
+- [ ] **0003** — `perf_analyzer`: benchmark throughput/latency (p50/p99) *(đã có bài)*
+- [ ] **0004** — Thu thập Prometheus metrics + tổng hợp báo cáo *(đã có bài)*
+- [ ] **0005** — Path GPU (Colab/cloud) + benchmark GPU thật *(đã có bài — notebook `colab/`)*
+
+Tick `[x]` khi **bạn đã tự làm hands-on pass** bài đó — bài 0002–0005 mới được soạn xong, chưa học.
 
 ## Nguồn chính
 

@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bài 0003 — perf_analyzer: benchmark throughput &amp; latency</title>
+<link rel="stylesheet" href="../assets/style.css">
+<style>.term-prompt::before{content:"$ ";}</style>
+</head>
+<body>
+<main>
+<p class="meta-line">BÀI 0003 · Triton Serving &amp; Performance · ~30 phút · hands-on trên máy bạn</p>
+<h1><code>perf_analyzer</code>: đo throughput &amp; latency như dân chuyên</h1>
+<p class="subtitle">Mục tiêu bài học: chạy được benchmark chính thức của Triton, <strong>đọc hiểu từng con số</strong> — throughput, p50/p90/p95/p99, breakdown queue/compute — và trả lời câu hỏi quan trọng nhất của role bạn: <em>"hệ thống này nhanh tới đâu, chậm ở đâu?"</em></p>
+
+<div class="callout mission">
+  <span class="label">Gắn với mission của bạn</span>
+  "Chạy <code>perf_analyzer</code> tự động, đọc hiểu kết quả throughput/latency (p50/p95/p99)" — nguyên văn mục tiêu trong MISSION.md của bạn. Số liệu bài này chính là <strong>đầu vào của team scheduling</strong>: không có benchmark đáng tin cậy thì không có quyết định phân bổ GPU hợp lý.
+</div>
+
+<h2>1. perf_analyzer làm gì? (3 phút)</h2>
+<p><code>perf_analyzer</code> là <strong>load generator chính thức</strong> của Triton: nó giả lập client bắn request theo đúng giao thức inference, tăng dần tải (concurrency), và đo <em>cả hai đầu</em> — latency nhìn từ client (bao gồm network) và từ server (queue + compute). Còn server, nó tự hỏi metrics endpoint để lấy số thực thi thật.</p>
+<p>Ba khái niệm cần nắm trước khi gõ lệnh:</p>
+<ul>
+  <li><strong>Concurrency</strong> — số request "đang bay" đồng thời. Concurrency 1 = client gửi xong request mới gửi tiếp. Concurrency 8 = 8 request cùng lúc.</li>
+  <li><strong>Measurement window</strong> — tool đo theo cửa sổ thời gian (mặc định thử nhiều cửa sổ) và chỉ chốt số khi <em>ổn định</em>. Nếu máy bạn đang bận (browser, IDE…) nó sẽ báo <code>Failed to obtain stable measurement</code> — không phải lỗi, là lời nhắc dọn nền hoặc tăng <code>--measurement-interval</code>.</li>
+  <li><strong>Percentile (p50/p99)</strong> — p50 là "một nửa request nhanh hơn con số này"; p99 là "99% request nhanh hơn con số này" — tức <strong>trường hợp xấu nhất mà 1% người dùng gánh</strong>. Sản phẩm thật quan tâm p99 hơn trung bình: một request 5 giây giữa biển request 200ms cũng đủ để người dùng tiếc nuối.</li>
+</ul>
+
+<h2>2. Cài đặt (5 phút, chỉ làm một lần)</h2>
+<p><code>perf_analyzer</code> không nằm trong server zip — nó nằm trong <strong>SDK zip</strong> (~458MB) cùng trang GitHub Releases. Script sau tải về và chỉ extract thư mục cần (~550MB), idempotent như <code>setup_triton_cpu.sh</code>:</p>
+<pre><code><span class="term-prompt"></span>./setup_perf_analyzer.sh</code></pre>
+<pre class="output">==> Tải SDK zip (~458MB) + extract chỉ thư mục install/
+Perf Analyzer Version 2.73.0 (commit unknown)
+Xong. Dùng qua wrapper: scripts/bench.sh -m onnx_linear ...</pre>
+<p>Wrapper <code>scripts/bench.sh</code> chỉ là lớp mỏng: trỏ đúng binary trong <code>~/.triton-cpu</code> và mặc định <code>-i http -u localhost:8000</code>. Chi tiết đã xác minh: binary link tĩnh, <strong>không cần thêm library nào</strong> — chạy được trên máy CPU-only này như thường.</p>
+
+<h2>3. Baseline: 1 client, chậm mà rõ (7 phút)</h2>
+<p>Server đang chạy với <code>onnx_linear</code> (bài 0002). Đo mốc đầu tiên — concurrency 1, cửa sổ 3 giây:</p>
+<pre><code><span class="term-prompt"></span>./scripts/bench.sh -m onnx_linear --concurrency-range 1 --measurement-interval 3000</code></pre>
+<pre class="output">Request concurrency: 1
+  Client: 
+    Request count: 22903
+    Throughput: 2111.26 infer/sec
+    Avg latency: 465 usec (standard deviation 252 usec)
+    p50 latency: 431 usec
+    p90 latency: 510 usec
+    p95 latency: 560 usec
+    p99 latency: 1403 usec
+    Avg HTTP time: 463 usec (send/recv 52 usec + response wait 411 usec)
+  Server: 
+    Inference count: 22903
+    Execution count: 22903
+    Successful request count: 22903
+    Avg request latency: 242 usec (overhead 17 usec + queue 200 usec + compute input 6 usec + compute infer 12 usec + compute output 6 usec)</pre>
+<p>Đọc từng nhóm — kỹ năng này dùng được cho mọi model về sau:</p>
+<ul>
+  <li><strong>Client: Throughput</strong> — 2111 infer/sec là số request/giây client chạy xong được. Con số "quy mô nhỏ" này bình thường: model nhỏ nhưng <em>mỗi HTTP request</em> tốn vài trăm µs — overhead giao thức chiếm phần lớn.</li>
+  <li><strong>Client: p50 vs p99</strong> — 431µs vs 1403µs: nửa request dưới 431µs, nhưng 1% xấu nhất chạm 1.4ms (gấp 3 lần). Std dev 252µs cũng nói rằng latency không đều.</li>
+  <li><strong>Server: breakdown</strong> — dòng cuối là mỏ vàng: tổng 242µs, trong đó <code>queue 200µs</code> nhưng <code>compute infer chỉ 12µs</code>. Server dành <strong>82% thời gian… xếp hàng</strong> (chờ gom batch theo <code>max_queue_delay 100µs</code> + chờ instance rảnh) và chỉ 5% cho tính toán!</li>
+</ul>
+<div class="callout tip">
+  <span class="label">Insight đầu tiên của bạn với vai trò này</span>
+  Model càng nhỏ, càng "chìm trong overhead": network + queue + serialization lấn át compute. Đây là lý do team scheduling cần <em>số đo</em> thay vì trực giác — và cũng là lý do một "model nhanh" chưa chắc cho "hệ thống rẻ".
+</div>
+
+<h2>4. Quét concurrency: tìm điểm bão hòa (8 phút)</h2>
+<p>Bây giờ tăng tải từng bậc và nhìn throughput/latency đổi thế nào. Kết quả đã đo trên máy này (8 core CPU, bỏ các bậc bị nhiễu):</p>
+<table>
+  <thead><tr><th>Concurrency</th><th>Throughput (infer/s)</th><th>p50 (µs)</th><th>p99 (µs)</th><th>exec / request</th></tr></thead>
+  <tbody>
+    <tr><td>1</td><td>2 111</td><td>431</td><td>1 403</td><td>1.0 (22903/22903)</td></tr>
+    <tr><td>2</td><td>5 803</td><td>286</td><td>1 958</td><td>~2.1</td></tr>
+    <tr><td>3</td><td>8 493</td><td>319</td><td>730</td><td>~1.7</td></tr>
+    <tr><td>8</td><td>11 343</td><td>534</td><td>3 190</td><td>~2.5 (170020/69192)</td></tr>
+  </tbody>
+</table>
+<p>Ba quy luật hiển thị ngay trong bảng — đây là "cú pháp" của mọi hệ thống serving:</p>
+<ol>
+  <li><strong>Throughput tăng dần rồi bão hòa</strong> — c=1→2 tăng 2.7x (batcher + 2 instance gom việc), nhưng c=3→8 chỉ tăng 1.3x: CPU 8 core đã no.</li>
+  <li><strong>p99 phình nhanh hơn p50</strong> — c=1→8: p50 chỉ x1.2 (431→534µs) nhưng p99 x2.3 (1.4→3.2ms). Đuôi phân phối là nơi overload lộ diện đầu tiên.</li>
+  <li><strong>exec/request &gt; 1 chứng minh dynamic batching</strong> — ở c=8: 170 020 request chỉ tốn 69 192 lần thực thi, trung bình mỗi lần gộp ~2.5 request (đúng cơ chế đã chứng minh bằng metrics ở bài 0002).</li>
+</ol>
+<p>Lệnh cho từng bậc: <code>--concurrency-range 8</code> (mốc cố định) hoặc quét dải <code>--concurrency-range 1:8</code>. Nếu dính cảnh báo sau, đó là <em>kinh nghiệm benchmark thật</em>, không phải thất bại:</p>
+<pre class="output">Failed to obtain stable measurement within 10 measurement windows for concurrency 2. Please try to increase the --measurement-interval.</pre>
+<p>Ba cách xử lý, theo thứ tự ưu tiên: (1) đóng bớt app nền — load average &gt; nửa số core là số liệu sẽ nhiễu; (2) tăng <code>--measurement-interval</code> (3000–5000ms); (3) tăng <code>--max-trials 20</code> cho tool thêm cơ hội chốt cửa sổ ổn định.</p>
+
+<h2>5. A/B test: tắt dynamic batching — kết quả ngược đời (7 phút)</h2>
+<p>Câu hỏi quan trọng nhất của benchmarking: <em>"config này có thực sự tốt hơn?"</em>. Thử nghiệm: tắt <code>dynamic_batching</code> (xóa block đó trong <code>config.pbtxt</code>, restart server), chạy lại cùng mốc c=8:</p>
+<table>
+  <thead><tr><th>c=8</th><th>Throughput</th><th>p50</th><th>p99</th><th>exec/request</th></tr></thead>
+  <tbody>
+    <tr><td><strong>Bật</strong> batching (delay 100µs)</td><td>11 343 infer/s</td><td>534 µs</td><td>3 190 µs</td><td>~2.5</td></tr>
+    <tr><td><strong>Tắt</strong> batching</td><td><strong>14 552 infer/s</strong></td><td><strong>440 µs</strong></td><td><strong>2 127 µs</strong></td><td>1.0</td></tr>
+  </tbody>
+</table>
+<p><strong>Tắt batching nhanh hơn trên mọi mặt trận — ngược với lời khuyên "luôn bật dynamic batching".</strong> Giải thích nằm ở breakdown mục 3: model này tính trong ~12µs, nên gộp 8 request không tiết kiệm được bao nhiêu compute (CPU làm 1 phép nhân ma trận nhỏ cũng nhanh bằng 8 phép), trong khi mỗi request vẫn phải nộp "thuế queue" 100µs+. Batch chỉ đáng khi <strong>compute mỗi batch tiết kiệm được nhiều hơn thời gian chờ gom</strong> — điển hình: model nặng trên GPU, batch 8 chỉ tốn nhiều hơn batch 1 một chút trong khi gộp được 8 lần xếp hàng.</p>
+<div class="callout warn">
+  <span class="label">Bài học method</span>
+  Đừng tin lời khuyên chung chung — kể cả trong docs. <strong>Đo rồi mới kết luận</strong>, và luôn ghi lại điều kiện đo (model, config, concurrency, phần cứng, load nền). A/B như trên chính là quy trình bạn sẽ lặp lại với model dự án.
+</div>
+<p>Xong thì nhớ <strong>restart lại config gốc</strong> (có <code>dynamic_batching</code>) để các bước sau dùng đúng.</p>
+
+<h2>6. Lưu report để team dùng (2 phút)</h2>
+<p>Thêm <code>-f</code> để ghi report ra file — tiện ghép vào báo cáo (bài 0004):</p>
+<pre><code><span class="term-prompt"></span>./scripts/bench.sh -m onnx_linear --concurrency-range 8 --measurement-interval 3000 -f reports/bench_c8.csv</code></pre>
+<p>Mỗi bậc concurrency một dòng, đủ cả breakdown. Ba lưu ý đã xác minh trên bản 2.73: file ra luôn là <strong>CSV</strong> dù đặt đuôi <code>.json</code> (không có option <code>--report-format</code> như bản cũ); <code>-c 8</code> là option <em>deprecated</em> với nghĩa "quét từ 1 tới tối đa 8" — khác <code>--concurrency-range 8</code> nghĩa "đo đúng mốc 8"; và nhớ tạo thư mục <code>reports/</code> trước khi ghi. Đuôi CSV này chính là đầu vào của script tổng hợp báo cáo ở bài sau.</p>
+
+<ul class="checklist">
+  <li><code>./setup_perf_analyzer.sh</code> chạy xong, <code>--version</code> ra 2.73.0</li>
+  <li>Baseline c=1: đọc được breakdown queue vs compute, chỉ ra % thời gian xếp hàng</li>
+  <li>Đo được ≥ 3 bậc concurrency, thấy throughput bão hòa + p99 phình</li>
+  <li>A/B tắt/bật batching: ghi lại được bảng so sánh và tự giải thích vì sao</li>
+  <li>Xuất được report CSV vào <code>reports/</code></li>
+</ul>
+
+<div class="quiz" data-quiz-id="lesson0003"></div>
+
+<h2>Đọc sâu hơn (nguồn chính)</h2>
+<ul>
+  <li><a href="https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/perf_analyzer/docs/quick_start.html">perf_analyzer Quick Start</a> (10 phút) — cách đọc output chuẩn từ chính NVIDIA.</li>
+  <li><a href="https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/perf_analyzer/docs/cli.html">CLI Reference</a> — tra cứu khi cần option lạ (measurement, stability, search mode).</li>
+</ul>
+
+<div class="callout tip">
+  <span class="label">Bài tiếp theo sẽ là gì?</span>
+  Số benchmark đã có trong tay, giờ là phần việc "chính thức" của bạn: <strong>thu thập runtime metrics từ Prometheus endpoint</strong> trong lúc có tải, rồi tổng hợp mọi thứ thành một bản báo cáo gọn gửi team.
+</div>
+
+<div class="lesson-nav">
+  <a href="0002-onnx-model-and-config-pbtxt.html">← Bài 0002: ONNX &amp; config.pbtxt</a>
+  <a href="0004-metrics-and-report.html">Bài 0004: Metrics &amp; báo cáo →</a>
+</div>
+
+<script>
+window.QUIZZES = window.QUIZZES || {};
+window.QUIZZES["lesson0003"] = [
+  {
+    q: "p99 latency = 3ms nghĩa là gì?",
+    opts: ["99% request nhanh hơn 3ms", "Request chậm nhất là 3ms", "Trung bình 3ms mỗi 99 request"],
+    answer: 0,
+    explain: "p99 là mốc mà 99% request nằm dưới nó. Nó KHÔNG phải request chậm nhất (đó là max). p99 quan trọng vì trải nghiệm tệ nhất của 1% người dùng thường là thứ sản phẩm quan tâm."
+  },
+  {
+    q: "Trong breakdown của server, 'queue' đo điều gì?",
+    opts: ["Thời gian request chờ trong batcher/trước khi được thực thi", "Thời gian client chờ phản hồi về tới tay", "Dung lượng bộ nhớ chứa request"],
+    answer: 0,
+    explain: "queue = khoảng thời gian server giữ request trước khi bắt đầu compute (chờ gom batch, chờ instance rảnh). Client thấy thêm cả network + serialization nên client latency luôn ≥ server latency."
+  },
+  {
+    q: "Ở c=8, Inference count 170020 nhưng Execution count 69192 — điều đó nghĩa là gì?",
+    opts: ["Dynamic batching gộp trung bình ~2.5 request/lần thực thi", "Server mất ~100k request", "Model chạy 2.5 lần mỗi request"],
+    answer: 0,
+    explain: "inference = request hoàn thành; execution = lần model thực thi (một batch = một execution). Chênh lệch giữa hai số chính là bằng chứng batching đang gộp nhiều request vào một lần chạy."
+  },
+  {
+    q: "Với model cực nhỏ (compute ~12µs), vì sao tắt dynamic batching lại nhanh hơn?",
+    opts: ["Tiết kiệm compute khi gộp ít hơn thuế chờ queue", "Vì tắt batching làm tăng throughput của CPU", "Vì model nhỏ không chạy được batch"],
+    answer: 0,
+    explain: "Gộp batch chỉ có lợi khi compute mỗi batch tiết kiệm nhiều hơn thời gian chờ gom. Model nhỏ compute quá rẻ nên 'thuế' 100µs+ queue là lỗ. Với model nặng/GPU thì bài toán ngược lại — luôn đo trước khi chốt."
+  },
+  {
+    q: "perf_analyzer báo 'Failed to obtain stable measurement' — cách xử lý KHÔNG đúng là?",
+    opts: ["Restart Triton server rồi đo lại ngay", "Tăng --measurement-interval", "Giảm tải nền (đóng app) hoặc tăng --max-trials"],
+    answer: 0,
+    explain: "Cảnh báo này là nhiễu đo từ phía client/máy (load nền cao), không phải trạng thái server — restart server không giải quyết nhiễu. Giảm tải nền, tăng measurement window, hoặc tăng số lần thử."
+  }
+];
+</script>
+<script src="../assets/quiz.js"></script>
+</main>
+</body>
+</html>

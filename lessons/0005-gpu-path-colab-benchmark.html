@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bài 0005 — Path GPU: Colab T4 &amp; benchmark GPU thật</title>
+<link rel="stylesheet" href="../assets/style.css">
+<style>.term-prompt::before{content:"$ ";}</style>
+</head>
+<body>
+<main>
+<p class="meta-line">BÀI 0005 · Triton Serving &amp; Performance · ~45 phút (trên Colab) · cần runtime GPU</p>
+<h1>Path GPU: Colab T4 &amp; benchmark thật</h1>
+<p class="subtitle">Mục tiêu bài học: mang đúng pipeline đã xây (serve → benchmark → metrics → báo cáo) sang <strong>GPU thật</strong>, thu DCGM metrics chưa từng thấy trên máy CPU, và trả lời câu hỏi của cả dự án bằng số liệu: <em>GPU đáng tiền khi nào?</em></p>
+
+<div class="callout mission">
+  <span class="label">Gắn với mission của bạn</span>
+  Máy bạn không GPU; môi trường thực hành GPU của mission là "Google Colab (T4 free)". Nhưng ý nghĩa lớn hơn nằm ở data: bảng <strong>CPU vs GPU theo cost</strong> cuối bài chính là hình thức đầu ra mà team Cost-Aware Scheduling cần để ra quyết định — bạn đang tự tạo mẫu cho sản phẩm cuối của dự án.
+</div>
+
+<h2>1. Ba con đường chạy Triton trên Colab (5 phút)</h2>
+<p>Đã khảo sát (xem <a href="../RESOURCES.md#Gaps">RESOURCES.md — Gaps</a>): <strong>không có notebook chính thức</strong> nào chạy Triton server ngay trên VM Colab. Ba hướng khả thi, xếp theo độ thực tế:</p>
+<table>
+  <thead><tr><th>Con đường</th><th>Trạng thái</th><th>Đánh giá</th></tr></thead>
+  <tbody>
+    <tr><td><strong>Zip release</strong> (cùng recipe bài 0001)</td><td>đã verify trên máy CPU; trên Colab <em>chưa verify</em></td><td>Khả thi nhất — cùng 1 zip <code>cu132</code>: có GPU + driver mới thì dùng GPU, không thì fallback CPU. Điều kiện: driver VM ≥ <strong>r580</strong> (CUDA 13)</td></tr>
+    <tr><td>Build từ source <code>--no-container-build</code></td><td>proven 1 lần (r23.10, walkthrough ngoài)</td><td>Rất nặng (hàng giờ compile) — chỉ khi zip bế tắc</td></tr>
+    <tr><td>Docker</td><td>không chạy chuẩn trên Colab</td><td>Loại ngay — Colab không cho daemon Docker đúng nghĩa</td></tr>
+  </tbody>
+</table>
+<p>Vì thế bài này là bài <strong>probe-driven</strong>: mỗi bước kiểm tra điều kiện rồi mới đi tiếp, kết quả nào chưa verify thì notebook tự in hướng dẫn rẽ nhánh. Đây cũng là kỹ năng thật: tiếp cận môi trường lạ bằng thí nghiệm nhỏ, không bằng hy vọng.</p>
+
+<div class="diagram-card">
+  <div class="diagram-header">
+    <div class="diagram-title"><span>🧭</span> Cây quyết định của buổi học</div>
+    <div class="diagram-tags"><span class="d-tag d-tag-blue">probe trước</span><span class="d-tag d-tag-green">rẽ nhánh sau</span></div>
+  </div>
+  <div class="diagram-body">
+    <svg viewBox="0 0 740 240" width="100%" height="auto" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <marker id="a5" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#0f6b5c"/></marker>
+        <marker id="a5r" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#b45309"/></marker>
+      </defs>
+      <g transform="translate(20,80)">
+        <rect x="0" y="0" width="170" height="64" rx="10" fill="#eff6ff" stroke="#93c5fd" stroke-width="1.5"/>
+        <text x="85" y="26" text-anchor="middle" font-family="Inter,sans-serif" font-size="11.5" font-weight="700" fill="#1e40af">Bước 0: probe</text>
+        <text x="85" y="44" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="11" fill="#1d4ed8">!nvidia-smi</text>
+      </g>
+      <path d="M 190 112 L 250 112" stroke="#0f6b5c" stroke-width="2" marker-end="url(#a5)"/>
+      <g transform="translate(255,40)">
+        <rect x="0" y="0" width="200" height="60" rx="10" fill="#ecfdf5" stroke="#6ee7b7" stroke-width="1.5"/>
+        <text x="100" y="24" text-anchor="middle" font-family="Inter,sans-serif" font-size="11.5" font-weight="700" fill="#065f46">Driver ≥ r580</text>
+        <text x="100" y="42" text-anchor="middle" font-family="Inter,sans-serif" font-size="10.5" fill="#047857">→ zip cu132 dùng được GPU</text>
+      </g>
+      <g transform="translate(255,140)">
+        <rect x="0" y="0" width="200" height="60" rx="10" fill="#fffbeb" stroke="#fde68a" stroke-width="1.5"/>
+        <text x="100" y="24" text-anchor="middle" font-family="Inter,sans-serif" font-size="11.5" font-weight="700" fill="#92400e">Driver &lt; r580 / không GPU</text>
+        <text x="100" y="42" text-anchor="middle" font-family="Inter,sans-serif" font-size="10.5" fill="#b45309">→ đổi runtime, hoặc quay CPU</text>
+      </g>
+      <path d="M 355 70 C 380 70, 390 55, 455 55" stroke="#0f6b5c" stroke-width="2" marker-end="url(#a5)" fill="none"/>
+      <path d="M 355 170 C 380 170, 390 185, 455 185" stroke="#b45309" stroke-width="2" marker-end="url(#a5r)" fill="none"/>
+      <g transform="translate(460,20)">
+        <rect x="0" y="0" width="260" height="200" rx="10" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.2"/>
+        <text x="14" y="24" font-family="Inter,sans-serif" font-size="11.5" font-weight="700" fill="#334155">Cùng pipeline, nền mới:</text>
+        <text x="14" y="48" font-family="Inter,sans-serif" font-size="10.5" fill="#475569">1. Serve repo đã có (bài 1–2)</text>
+        <text x="14" y="70" font-family="Inter,sans-serif" font-size="10.5" fill="#475569">2. + model nặng 512×512 (bài này)</text>
+        <text x="14" y="92" font-family="Inter,sans-serif" font-size="10.5" fill="#475569">3. perf_analyzer c=1 và c=8</text>
+        <text x="14" y="114" font-family="Inter,sans-serif" font-size="10.5" fill="#475569">4. DCGM metrics: GPU_UTIL</text>
+        <text x="14" y="136" font-family="Inter,sans-serif" font-size="10.5" fill="#475569">5. Bảng CPU vs GPU theo cost</text>
+        <text x="14" y="166" font-family="Inter,sans-serif" font-size="10.5" font-weight="600" fill="#0f6b5c">Số nào chưa verify → chính là</text>
+        <text x="14" y="183" font-family="Inter,sans-serif" font-size="10.5" font-weight="600" fill="#0f6b5c">việc của bạn điền vào</text>
+      </g>
+    </svg>
+  </div>
+</div>
+
+<h2>2. Notebook Colab đã chuẩn bị sẵn (không phải gõ tay)</h2>
+<p>Mở <a href="../colab/0005-triton-gpu-t4.ipynb"><code>colab/0005-triton-gpu-t4.ipynb</code></a> trên Colab (<em>File → Upload notebook</em>, nhớ chọn <strong>runtime GPU</strong>). Notebook gồm 8 bước, mỗi bước một cell, tái dùng toàn bộ tài sản của 4 bài trước:</p>
+<ul>
+  <li><strong>Bước 0 — probe</strong>: <code>!nvidia-smi</code> + parse driver, in ngay kết luận "được / rẽ nhánh".</li>
+  <li><strong>Bước 1 — cài Triton</strong>: cùng recipe zip + extract openssl/DCGM + wheel CUDA như <code>setup_triton_cpu.sh</code>, nhưng không đụng apt của VM Colab.</li>
+  <li><strong>Bước 2</strong>: <code>git clone</code> lab repo này — model repository, scripts, reports dùng nguyên xi.</li>
+  <li><strong>Bước 3 — model nặng</strong>: sinh <code>onnx_bigmatmul</code> (matmul 512×512) ngay tại chỗ. <em>Vì sao cần model thứ hai?</em> <code>onnx_linear</code> tính trong ~10µs — GPU chẳng có việc gì làm, kernel launch (hàng chục µs) còn đắt hơn phép tính. Model nặng mới để GPU lộ giá trị.</li>
+  <li><strong>Bước 4 — config GPU</strong>: chỉ khác CPU ở <code>instance_group { kind: KIND_GPU count: 1 }</code>. Quy tắc GPU: <strong>thường chỉ 1 instance</strong> — nhân bản model trên 1 GPU chỉ thêm tranh chấp, khác hẳn tư duy CPU nhiều core.</li>
+  <li><strong>Bước 5–7</strong>: serve background + health check, inference smoke test (payload <em>không đổi một ký tự</em> so với CPU — client không cần biết nền là gì), perf_analyzer, DCGM metrics.</li>
+  <li><strong>Bước 8</strong>: điền bảng cost so sánh.</li>
+</ul>
+
+<div class="callout warn">
+  <span class="label">Kỳ vọng đúng trước khi chạy</span>
+  Trên Colab có thể gặp: driver cũ hơn r580 (rẽ nhánh), link libssl khác Ubuntu 22.04 (xem log, thử extract deb 24.04 như notebook đã làm), quota GPU free hết (thử lại giờ khác). Mỗi vấp vált là một dòng ghi vào báo cáo cuối — "path đã thử, lỗi gì, xử lý thế nào" chính là giá trị của bài này, không phải "chạy được ngay".
+</div>
+
+<h2>3. Ba điều GPU sẽ dạy bạn mà CPU không thể (đọc trước khi đo)</h2>
+<h3>a) Model nhỏ thì GPU… thua CPU</h3>
+<p>Với <code>onnx_linear</code>: CPU đáp ~430µs p50 (bài 0003) trong khi GPU cần ~hàng trăm µs–1ms chỉ để gửi work xuống GPU (kernel launch + PCIe + sync). <strong>Quy luật: dưới ngưỡng "đủ nặng", GPU là thuần overhead.</strong> Đừng ngạc nhiên khi thấy con số này trong perf_analyzer — đó là data, không phải lỗi.</p>
+<h3>b) Model nặng thì dynamic batching mới "về đúng chỗ"</h3>
+<p>Matmul 512×512 (batch 32) là mức đầu tiên GPU gai đuôi: compute một batch lớn chỉ chậm hơn ít so với batch nhỏ → gộp request ăn thưởng thật. So <code>exec_count/request_count</code> ở c=8 giữa 2 model sẽ thấy batching trên GPU <strong>đáng giá hơn nhiều</strong> batching trên CPU — khớp với lý thuyết ở bài 0002 mục 5.</p>
+<h3>c) Metrics lộ ra cả họ mới: <code>DCGM_*</code></h3>
+<pre><code><span class="term-prompt"></span>curl -s localhost:8002/metrics | grep -E '^DCGM_FI_DEV_(GPU_UTIL|MEM_COPY_UTIL|FB_USED)'</code></pre>
+<pre class="output">DCGM_FI_DEV_GPU_UTIL{gpu="0",...} 87
+DCGM_FI_DEV_MEM_COPY_UTIL{gpu="0",...} 12
+DCGM_FI_DEV_FB_USED{gpu="0",...} 1783</pre>
+<p><code>GPU_UTIL 87</code> khi perf_analyzer đang đạp tải = GPU bận gần hết giờ; <code>FB_USED</code> ~1.8GB = phần VRAM model chiếm. Cặp số này — <em>utilization khi phục vụ tải</em> — chính là thứ team scheduling cần để biết "1 GPU gánh được mấy model, mấy bản replica". Trên máy CPU-only của bạn, cả họ này vắng mặt (bài 0004 đã nhắc).</p>
+
+<h2>4. Kết quả cuối: bảng cost — ngôn ngữ chung của dự án</h2>
+<p>Bước 8 của notebook yêu cầu điền số vào bảng sau (cột CPU đã có sẵn từ <code>reports/0001-cpu-baseline-onnx-linear.md</code>):</p>
+<table>
+  <thead><tr><th>Model</th><th>Nền</th><th>Throughput</th><th>p50 / p99</th><th>Chi phí</th><th>infer/s mỗi $/h</th></tr></thead>
+  <tbody>
+    <tr><td>onnx_bigmatmul</td><td>CPU 8 core (máy Nam)</td><td><em>bạn điền</em></td><td><em>bạn điền</em></td><td>"miễn phí" (điện + thời gian)</td><td>—</td></tr>
+    <tr><td>onnx_bigmatmul</td><td>Colab T4</td><td><em>bạn điền</em></td><td><em>bạn điền</em></td><td>free-tier (có quota) / ~$0.5/h nếu tính tiền</td><td><em>bạn điền</em></td></tr>
+  </tbody>
+</table>
+<p><strong>Công thức chuẩn của dự án</strong> — nhớ luôn số này:</p>
+<pre><code>cost_per_1M_inference = (giá_$mỗi_giờ × 1_000_000) / (throughput_infer_per_s × 3600)</code></pre>
+<p>Ví dụ phương pháp: nếu T4 cho 2 000 infer/s cho model X và giá thầu $0.53/h → ~$0.074 / triệu inference. Cùng model trên CPU hộp 8 core nếu đạt 500 infer/s "0 đồng" thì đáng chọn hơn khi nào? Khi tải thấp đủ để CPU kịp — và chính xác ở <em>điểm tải nào</em> thì phải đổi tàu là câu trả lời team scheduling cần từ bạn. Không có số trước, không có quyết định sau.</p>
+
+<h2>5. Giao hàng của toàn khóa</h2>
+<p>Khi notebook chạy xong, tổng hợp thành báo cáo thứ hai (tự làm — bạn đã có đủ kỹ năng từ bài 0004):</p>
+<ul class="checklist">
+  <li><code>reports/0002-gpu-vs-cpu-onnx-bigmatmul.md</code> — bảng benchmark CPU vs GPU + GPU util + phần kết luận của bạn</li>
+  <li>Notebook Colab chạy đến bước 8 (hoặc ghi lại rõ vấp vát nếu rẽ nhánh) — chính là "log đóng gói" trong mission</li>
+  <li>Câu trả lời có số liệu cho: "model X nên nằm CPU hay GPU ở mức tải Y?"</li>
+  <li>Review lại 5 bài: bạn tự nói được toàn bộ pipeline từ <code>config.pbtxt</code> đến bảng cost</li>
+</ul>
+
+<div class="quiz" data-quiz-id="lesson0005"></div>
+
+<h2>Đọc sâu hơn (nguồn chính)</h2>
+<ul>
+  <li><a href="https://github.com/triton-inference-server/tutorials">Triton tutorials (official)</a> — Quick-Deploy ONNX/PyTorch, các feature guide (đọc mục ONNX).</li>
+  <li><a href="https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/user_guide/metrics.html">Metrics guide — GPU section</a> — họ DCGM_* chi tiết.</li>
+  <li><a href="https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/user_guide/model_configuration.html#instance-groups">Instance Groups trên GPU</a> — vì sao 1 GPU thường chỉ cần 1 instance.</li>
+</ul>
+
+<div class="callout tip">
+  <span class="label">Sau khóa này, đi tiếp hướng nào?</span>
+  Ba hướng mở, chọn khi mission đòi hỏi: (1) model thật của dự án (PyTorch → ONNX export → pipeline cũ dùng lại nguyên xi); (2) explicit model management + Kubernetes/Kueue khái niệm — nơi metrics của bạn bị "trăn" (consumed); (3) TensorRT optimization — cùng model, tăng tốc thêm trên GPU. Đều đã liệt kê nguồn trong <a href="../RESOURCES.md">RESOURCES.md</a>.
+</div>
+
+<div class="lesson-nav">
+  <a href="0004-metrics-and-report.html">← Bài 0004: Metrics &amp; báo cáo</a>
+  <span>Về <a href="../README.md">README</a> — lộ trình đã hoàn tất</span>
+</div>
+
+<script>
+window.QUIZZES = window.QUIZZES || {};
+window.QUIZZES["lesson0005"] = [
+  {
+    q: "Vì sao bài này thêm model matmul 512×512 thay vì chỉ dùng onnx_linear?",
+    opts: ["Model quá nhỏ thì GPU toàn overhead, không lộ giá trị", "onnx_linear không chạy được trên GPU", "Matmul 512 là batch size tối đa của Triton"],
+    answer: 0,
+    explain: "Compute ~10µs nhỏ hơn cả chi phí đưa work xuống GPU (kernel launch + transfer). Model phải đủ nặng để phần tiết kiệm compute vượt overhead — khi đó GPU (và batching) mới 'về đích'."
+  },
+  {
+    q: "Trên 1 GPU duy nhất, số instance hợp lý thường là?",
+    opts: ["1 — thêm chỉ gây tranh chấp", "Bằng số core CPU", "8 — càng nhiều càng nhanh"],
+    answer: 0,
+    explain: "Khác CPU (nhiều core → nhiều instance), 1 GPU chia cho nhiều instance của cùng model chỉ làm chúng tranh chấp tài nguyên. Tăng instance GPU chỉ hợp lý trên GPU lớn / model nhỏ hoặc mục đích isolation."
+  },
+  {
+    q: "Inference payload JSON phía client có cần đổi khi chuyển server từ CPU sang GPU không?",
+    opts: ["Không — client không cần biết nền là gì", "Có — phải thêm trường 'device': 'gpu'", "Có — datatype đổi thành FP16 bắt buộc"],
+    answer: 0,
+    explain: "KServe V2 protocol che nền hạ: cùng endpoint, cùng payload. Việc CPU/GPU là chuyện của config.pbtxt phía server — một trong những lợi thế lớn nhất của kiến trúc serving này."
+  },
+  {
+    q: "DCGM_FI_DEV_GPU_UTIL = 87 trong lúc perf_analyzer đạp tải nghĩa là?",
+    opts: ["GPU bận ~87% thời gian đang phục vụ tải", "87 request/giây", "GPU còn 87% bộ nhớ trống"],
+    answer: 0,
+    explain: "Đây là gauge utilization (% thời gian GPU có kernel chạy). Cặp GPU_UTIL khi có tải + FB_USED (VRAM) là dữ liệu sống cho team scheduling: 1 GPU gánh được mấy model, mấy replica."
+  },
+  {
+    q: "cost_per_1M_inference tính thế nào?",
+    opts: ["(giá $/h × 1.000.000) / (throughput × 3600)", "giá $/h × throughput", "throughput / 1.000.000"],
+    answer: 0,
+    explain: "Đổi throughput (infer/s) ra infer/giờ (×3600), lấy giá giờ chia ra được $ mỗi inference, nhân 1M để có đơn vị dễ đọc. Mẫu số throughput phải là throughput ỔN ĐỊNH ở mức tải thực, không phải đỉnh benchmark."
+  }
+];
+</script>
+<script src="../assets/quiz.js"></script>
+</main>
+</body>
+</html>

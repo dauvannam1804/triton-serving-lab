@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bài 0002 — Model ONNX thật &amp; config.pbtxt</title>
+<link rel="stylesheet" href="../assets/style.css">
+<style>.term-prompt::before{content:"$ ";}</style>
+</head>
+<body>
+<main>
+<p class="meta-line">BÀI 0002 · Triton Serving &amp; Performance · ~25 phút · hands-on trên máy bạn</p>
+<h1>Model ONNX thật &amp; <code>config.pbtxt</code></h1>
+<p class="subtitle">Mục tiêu bài học: deploy một model <strong>ONNX thật</strong> (không phải model gương), tự viết <code>config.pbtxt</code> với <em>dynamic batching</em> + <em>instance group</em>, và — quan trọng nhất — <strong>chứng minh batching đang chạy</strong> bằng metrics, không phải bằng lời nói.</p>
+
+<div class="callout mission">
+  <span class="label">Gắn với mission của bạn</span>
+  Mục tiêu "tự tay dựng được model repository chuẩn (<code>config.pbtxt</code>, version, backend)" trong MISSION.md nằm trọn ở bài này. Dynamic batching là cơ chế quyết định throughput/latency — hiểu nó là nền để mọi số benchmark sau này của bạn có ý nghĩa với team scheduling.
+</div>
+
+<h2>1. <code>config.pbtxt</code> là hợp đồng giữa model và server (4 phút)</h2>
+<p>Bài trước model <code>identity</code> thông minh đến mức đâu vào đó — Triton gần như chẳng phải làm gì. Model thật thì khác: Triton phải biết <strong>input/output tên gì, kiểu gì, vài chiều nào</strong>, tối đa gom batch bao nhiêu, chạy mấy bản song song. Tất cả nằm trong một file: <code>config.pbtxt</code>. Có 3 khối mọi model thật đều cần:</p>
+<ul>
+  <li><strong>Chữ ký vào/ra</strong> — <code>input</code>/<code>output</code>: tên + <code>data_type</code> + <code>dims</code>. Phải khớp model file, lệch một chiều là load fail ngay.</li>
+  <li><strong><code>max_batch_size</code></strong> — batching bắt đầu từ đây. Khi &gt; 0, <code>dims</code> <em>không tính</em> chiều batch nữa (chiều batch do Triton thêm vào đầu). Khai báo <code>dims: [10]</code> + <code>max_batch_size: 8</code> ⇔ tensor thật có shape <code>[1..8, 10]</code>.</li>
+  <li><strong> Scheduler</strong> — <code>dynamic_batching {}</code> bật batcher gộp request; không có dòng này, các request vào lần lượt chạy rời (default scheduler) dù model hỗ trợ batch.</li>
+</ul>
+
+<div class="diagram-card">
+  <div class="diagram-header">
+    <div class="diagram-title">
+      <span>📐</span> Luồng request đi qua Dynamic Batcher (config của bài này)
+    </div>
+    <div class="diagram-tags">
+      <span class="d-tag d-tag-blue">preferred 2/4/8</span>
+      <span class="d-tag d-tag-green">delay 100µs</span>
+      <span class="d-tag d-tag-amber">2 instances</span>
+    </div>
+  </div>
+  <div class="diagram-body">
+    <svg viewBox="0 0 740 330" width="100%" height="auto" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <marker id="a2-blue" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#2563eb"/></marker>
+        <marker id="a2-teal" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#0f6b5c"/></marker>
+        <marker id="a2-purple" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#7c3aed"/></marker>
+      </defs>
+
+      <!-- Requests arriving -->
+      <g transform="translate(20,30)">
+        <text x="0" y="0" font-family="Inter,sans-serif" font-size="11" font-weight="700" fill="#475569">REQUESTS ĐẾN RỜI RẠC</text>
+        <rect x="0" y="14" width="120" height="26" rx="5" fill="#eff6ff" stroke="#93c5fd"/>
+        <text x="10" y="31" font-family="'JetBrains Mono',monospace" font-size="11" fill="#1e40af">req₁ [1,10]</text>
+        <rect x="18" y="48" width="120" height="26" rx="5" fill="#eff6ff" stroke="#93c5fd"/>
+        <text x="28" y="65" font-family="'JetBrains Mono',monospace" font-size="11" fill="#1e40af">req₂ [1,10]</text>
+        <rect x="0" y="82" width="120" height="26" rx="5" fill="#eff6ff" stroke="#93c5fd"/>
+        <text x="10" y="99" font-family="'JetBrains Mono',monospace" font-size="11" fill="#1e40af">req₃ [1,10]</text>
+        <rect x="18" y="116" width="120" height="26" rx="5" fill="#eff6ff" stroke="#93c5fd"/>
+        <text x="28" y="133" font-family="'JetBrains Mono',monospace" font-size="11" fill="#1e40af">req₄ [1,10]</text>
+      </g>
+
+      <path d="M 165 88 L 205 88" stroke="#2563eb" stroke-width="2" marker-end="url(#a2-blue)" fill="none"/>
+      <text x="185" y="78" text-anchor="middle" font-family="Inter,sans-serif" font-size="9" font-weight="700" fill="#2563eb">HÀNG ĐỢI</text>
+
+      <!-- Dynamic batcher -->
+      <g transform="translate(210,30)">
+        <rect x="0" y="0" width="220" height="150" rx="10" fill="#f0fdf4" stroke="#86efac" stroke-width="1.5"/>
+        <rect x="0" y="0" width="220" height="30" rx="10" fill="#dcfce7"/>
+        <path d="M 0 20 L 0 30 L 220 30 L 220 20 Z" fill="#dcfce7"/>
+        <text x="12" y="20" font-family="Inter,sans-serif" font-size="12" font-weight="700" fill="#166534">⚡ DYNAMIC BATCHER</text>
+        <text x="12" y="50" font-family="'JetBrains Mono',monospace" font-size="11" fill="#15803d">preferred_batch_size [2,4,8]</text>
+        <text x="12" y="70" font-family="'JetBrains Mono',monospace" font-size="11" fill="#15803d">max_queue_delay 100 µs</text>
+        <rect x="12" y="84" width="196" height="26" rx="5" fill="#ffffff" stroke="#4ade80"/>
+        <text x="22" y="101" font-family="'JetBrains Mono',monospace" font-size="11" font-weight="600" fill="#166534">batch [2,10] → chạy!</text>
+        <text x="12" y="130" font-family="Inter,sans-serif" font-size="9.5" fill="#166534">Đủ preferred size → bắn ngay.</text>
+        <text x="12" y="143" font-family="Inter,sans-serif" font-size="9.5" fill="#166534">Hết delay → bắn batch lẻ.</text>
+      </g>
+
+      <path d="M 435 88 L 475 88" stroke="#0f6b5c" stroke-width="2" marker-end="url(#a2-teal)" fill="none"/>
+      <text x="455" y="78" text-anchor="middle" font-family="Inter,sans-serif" font-size="9" font-weight="700" fill="#0f6b5c">BATCH</text>
+
+      <!-- Instances -->
+      <g transform="translate(480,30)">
+        <rect x="0" y="0" width="240" height="150" rx="10" fill="#ffffff" stroke="#c4b5fd" stroke-width="1.5"/>
+        <rect x="0" y="0" width="240" height="30" rx="10" fill="#f5f3ff"/>
+        <path d="M 0 20 L 0 30 L 240 30 L 240 20 Z" fill="#f5f3ff"/>
+        <text x="12" y="20" font-family="Inter,sans-serif" font-size="12" font-weight="700" fill="#5b21b6">🧵 instance_group: count 2</text>
+        <g transform="translate(14,44)">
+          <rect x="0" y="0" width="100" height="42" rx="6" fill="#faf5ff" stroke="#d8b4fe"/>
+          <text x="50" y="17" text-anchor="middle" font-family="Inter,sans-serif" font-size="10" font-weight="700" fill="#6b21a8">instance #0</text>
+          <text x="50" y="32" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="10" fill="#7e22ce">onnxruntime</text>
+        </g>
+        <g transform="translate(126,44)">
+          <rect x="0" y="0" width="100" height="42" rx="6" fill="#faf5ff" stroke="#d8b4fe"/>
+          <text x="50" y="17" text-anchor="middle" font-family="Inter,sans-serif" font-size="10" font-weight="700" fill="#6b21a8">instance #1</text>
+          <text x="50" y="32" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="10" fill="#7e22ce">onnxruntime</text>
+        </g>
+        <text x="14" y="112" font-family="Inter,sans-serif" font-size="9.5" fill="#4c1d95">2 batch chạy SONG SONG (2 thread</text>
+        <text x="14" y="126" font-family="Inter,sans-serif" font-size="9.5" fill="#4c1d95">ORT riêng) → giảm chờ nhau trên CPU.</text>
+        <text x="14" y="143" font-family="Inter,sans-serif" font-size="9.5" fill="#7e22ce">kind: KIND_CPU (có GPU thì KIND_GPU).</text>
+      </g>
+
+      <path d="M 600 180 C 600 240, 380 240, 240 240" stroke="#7c3aed" stroke-width="1.6" stroke-dasharray="3 3" marker-end="url(#a2-purple)" fill="none"/>
+
+      <!-- Metrics strip -->
+      <g transform="translate(20,222)">
+        <rect x="0" y="0" width="700" height="84" rx="10" fill="#faf5ff" stroke="#c4b5fd" stroke-width="1.2"/>
+        <text x="14" y="24" font-family="Inter,sans-serif" font-size="11" font-weight="700" fill="#5b21b6">📊 BẰNG CHỨNG Ở :8002/metrics — đếm CÁCH NÓ GỘP</text>
+        <text x="14" y="46" font-family="'JetBrains Mono',monospace" font-size="11" fill="#6b21a8">nv_inference_request_success: +64</text>
+        <text x="14" y="64" font-family="'JetBrains Mono',monospace" font-size="11" fill="#6b21a8">nv_inference_exec_count:     +43</text>
+        <text x="380" y="55" font-family="Inter,sans-serif" font-size="10" fill="#4c1d95">64 request vào, 43 lần thực thi ra</text>
+        <text x="380" y="70" font-family="Inter,sans-serif" font-size="10" fill="#4c1d95">⇒ batcher đã gộp — avg batch ≈ 64/43 ≈ 1.5</text>
+      </g>
+    </svg>
+  </div>
+  <div class="diagram-footer">
+    <div class="flow-step">
+      <span class="step-num">1</span>
+      <span><strong>Gom:</strong> request chờ trong queue tối đa <code>max_queue_delay_microseconds</code>, chờ đủ một trong các <code>preferred_batch_size</code>.</span>
+    </div>
+    <div class="flow-step">
+      <span class="step-num">2</span>
+      <span><strong>Chạy:</strong> batch tensor <code>[N,10]</code> đẩy cho 1 trong <code>count</code> instances rảnh — mỗi instance là 1 session ORT độc lập.</span>
+    </div>
+    <div class="flow-step">
+      <span class="step-num">3</span>
+      <span><strong>Đo:</strong> mỗi request được đếm ở <code>request_success</code>, mỗi lần model thực thi được đếm ở <code>exec_count</code> — chênh lệch chính là bằng chứng batching.</span>
+    </div>
+  </div>
+</div>
+
+<h2>2. Sinh model ONNX thật (3 phút)</h2>
+<p>Model bài này: <strong> phép biến đổi tuyến tính <code>y = 2x + 1</code></strong> dựng bằng 2 node ONNX chuẩn (<code>MatMul</code> với W = 2I, <code>Add</code> với b = 1). Nhỏ để train "khỏi cần", nhưng là model ONNX <em>đúng nghĩa</em>: chữ ký riêng, trọng số riêng, chạy qua onnxruntime backend — đúng thứ bạn sẽ làm với model dự án thật. Đầu vào/ra: <code>INPUT0</code>/<code>OUTPUT0</code>, float32, <code>[batch, 10]</code> với <strong>batch là chiều động</strong> (điều kiện để <code>max_batch_size &gt; 0</code>).</p>
+
+<pre><code><span class="term-prompt"></span>python3 scripts/make_onnx_model.py</code></pre>
+<pre class="output">Đã ghi : .../model_repository/onnx_linear/1/model.onnx (621 bytes)
+Input  : INPUT0 ['batch', 10] 1
+Output : OUTPUT0 ['batch', 10] 1
+Verify : onnxruntime OK — [1..10] → [3.0, 5.0, 7.0, 9.0, 11.0, 13.0, 15.0, 17.0, 19.0, 21.0]
+OK. Restart server để Triton load model này (./serve.sh).</pre>
+<p>Kết quả mong đợi: <code>[1,2,…,10]</code> → <code>[3,5,…,21]</code> = 2x+1. Script đã tự verify bằng <code>onnxruntime</code> trước khi bạn dám đưa cho Triton — thói quen tốt: <strong>test model độc lập trước, serving sau</strong>.</p>
+
+<p>Cấu trúc thư mục đúng quy ước bài 0001, chỉ thêm <code>platform</code> ở config:</p>
+<pre><code>model_repository/
+├── identity_cpu/          ← bài 0001 (model gương)
+└── onnx_linear/
+    ├── config.pbtxt
+    └── 1/
+        └── model.onnx     ← 621 bytes, sinh bởi script</code></pre>
+
+<h2>3. Giải phẫu <code>config.pbtxt</code> (5 phút)</h2>
+<p>Mở <code>model_repository/onnx_linear/config.pbtxt</code> và đối chiếu bảng sau — đây là 80% những gì bạn cần thuộc về file này:</p>
+
+<table>
+  <thead><tr><th>Trường</th><th>Giá trị bài này</th><th>Ý nghĩa với performance</th></tr></thead>
+  <tbody>
+    <tr><td><code>platform</code></td><td><code>"onnxruntime_onnx"</code></td><td>Bảo Triton dùng backend nào đọc model file. Bắt buộc với model "có định dạng" (onnx, tensorrt…). Backend <code>identity</code> của bài 0001 không cần vì khai báo <code>backend:</code> thay thế.</td></tr>
+    <tr><td><code>max_batch_size</code></td><td><code>8</code></td><td>Trần batch. <code>dims</code> từ đây <strong>không chứa chiều batch</strong>. Đặt 0 ⇔ model không nhận batch.</td></tr>
+    <tr><td><code>input/output</code></td><td>FP32, <code>dims: [10]</code></td><td>Phải khớp model file. Sai → <code>failed to load</code> với reason rõ ràng.</td></tr>
+    <tr><td><code>instance_group</code></td><td><code>count: 2, kind: KIND_CPU</code></td><td>Số bản sao model chạy song song. CPU-bound + nhiều core → tăng count để request không xếp hàng chờ nhau.</td></tr>
+    <tr><td><code>dynamic_batching.preferred_batch_size</code></td><td><code>[2, 4, 8]</code></td><td>Các "mốc" batcher tích cực gom. Đủ mốc → bắn ngay, không chờ delay.</td></tr>
+    <tr><td><code>max_queue_delay_microseconds</code></td><td><code>100</code></td><td>Trần thời gian chờ gom batch. Cao → batch to hơn (throughput ↑) nhưng thêm latency cố định. Đây là <strong>núm vặn throughput/latency</strong> của bạn.</td></tr>
+  </tbody>
+</table>
+
+<div class="callout warn">
+  <span class="label">Lỗi kinh điển</span>
+  Quên thư mục version <code>1/</code>, hoặc khai báo <code>dims: [-1, 10]</code> khi đã có <code>max_batch_size</code> (dẫn đến shape 3 chiều) — hai lý do phổ biến nhất khiến model ONNX không load. Triton luôn ghi reason ở dòng <code>failed to load</code> trong log server.
+</div>
+
+<h2>4. Hands-on: serve &amp; kiểm chứng (7 phút)</h2>
+
+<h3>Bước 1 — Restart server, nhìn bảng READY</h3>
+<p><code>Ctrl+C</code> server cũ (nếu đang chạy), rồi:</p>
+<pre><code><span class="term-prompt"></span>./serve.sh</code></pre>
+<pre class="output">+--------------+---------+--------+
+| Model        | Version | Status |
++--------------+---------+--------+
+| identity_cpu | 1       | READY  |
+| onnx_linear  | 1       | READY  |
++--------------+---------+--------+</pre>
+<p>Log còn ghi rõ đường đi: <code>loading: onnx_linear:1</code> → <code>TRITONBACKEND_Initialize: onnxruntime</code> → READY. Đây là lúc lỗi config sẽ hiện — nếu fail, đọc đúng dòng <code>failed to load</code>.</p>
+
+<h3>Bước 2 — Inference: đơn lẻ rồi batch từ phía client</h3>
+<pre><code><span class="term-prompt"></span>curl -s -X POST localhost:8000/v2/models/onnx_linear/infer \
+  -H "Content-Type: application/json" \
+  -d '{"inputs":[{"name":"INPUT0","shape":[1,10],"datatype":"FP32","data":[1,2,3,4,5,6,7,8,9,10]}],"outputs":[{"name":"OUTPUT0"}]}'</code></pre>
+<pre class="output">{"model_name":"onnx_linear","model_version":"1","outputs":[{"name":"OUTPUT0","datatype":"FP32","shape":[1,10],"data":[3.0,5.0,7.0,9.0,11.0,13.0,15.0,17.0,19.0,21.0]}]}</pre>
+<p>Đúng 2x+1. Giờ gộp 2 hàng vào <strong>một request</strong> (client-side batching — khác hoàn toàn dynamic batching phía server):</p>
+<pre><code><span class="term-prompt"></span>curl -s -X POST localhost:8000/v2/models/onnx_linear/infer \
+  -H "Content-Type: application/json" \
+  -d '{"inputs":[{"name":"INPUT0","shape":[2,10],"datatype":"FP32","data":[1,2,3,4,5,6,7,8,9,10,0,0,0,0,0,0,0,0,0,0]}],"outputs":[{"name":"OUTPUT0"}]}'</code></pre>
+<pre class="output">..."shape":[2,10],"data":[3.0,5.0,...,21.0, 1.0,1.0,...,1.0]}</pre>
+<p>Hàng thứ hai toàn số 0 → trả 1 (= 2·0+1). Shape <code>[2,10]</code> ≤ <code>max_batch_size 8</code> nên server nhận; thử <code>[9,10]</code> sẽ bị từ chối thẳng (<code>request batch size must be ≤ 8</code>) — chạy thử để nhớ giới hạn nằm ở đâu.</p>
+
+<h3>Bước 3 — Mẹo debug: hỏi lại Triton config nó đang chạy</h3>
+<pre><code><span class="term-prompt"></span>curl -s localhost:8000/v2/models/onnx_linear/config | python3 -m json.tool | grep -A5 dynamic_batching</code></pre>
+<pre class="output">"dynamic_batching": {
+    "preferred_batch_size": [2, 4, 8],
+    "max_queue_delay_microseconds": 100,
+    "preserve_ordering": false,
+    "priority_levels": 0,
+    ...</pre>
+<p>Đây là <strong>config hiệu lực</strong> sau khi Triton parse + áp default — không phải file trên đĩa. Mọi nghi vấn "config của tôi có được nhận không?" kết thúc ở endpoint này.</p>
+
+<h2>5. Chứng minh Dynamic Batching bằng metrics (6 phút)</h2>
+<p>Nói "batching chạy rồi" mà không có số là nói suông. Bài này bạn <strong>đo được</strong>: <code>nv_inference_request_success</code> đếm request vào, <code>nv_inference_exec_count</code> đếm lần model thực thi. Batcher gộp 4 request thành 1 batch → request +4 nhưng exec chỉ +1.</p>
+
+<h3>Bước 4 — Baseline, bắn tải, so sánh</h3>
+<pre><code><span class="term-prompt"></span>curl -s localhost:8002/metrics | grep -E '^nv_inference_(request_success|exec_count)\{model="onnx_linear"'</code></pre>
+<pre class="output">nv_inference_request_success{model="onnx_linear",version="1"} 2
+nv_inference_exec_count{model="onnx_linear",version="1"} 2</pre>
+<pre><code><span class="term-prompt"></span>python3 scripts/burst_requests.py --requests 64</code></pre>
+<pre class="output">Đã bắn  : 64 request (mỗi request batch 1 hàng, 16 threads)
+Thành công: 64/64
+Wall time : 322 ms (199 req/s)</code></pre>
+<pre><code><span class="term-prompt"></span>curl -s localhost:8002/metrics | grep -E '^nv_inference_(request_success|exec_count)\{model="onnx_linear"'</code></pre>
+<pre class="output">nv_inference_request_success{model="onnx_linear",version="1"} 66
+nv_inference_exec_count{model="onnx_linear",version="1"} 45</pre>
+<p>Số dư: <strong>+64 request, chỉ +43 lần thực thi</strong>. Nếu batcher không gộp, exec phải tăng đúng 64. Tỉ lệ ~1.5 nghe khiêm tốn — và đó là bài học thật: model này tính trong vài microgiây, queue thường chứa 1–2 request là đã đủ mốc <code>preferred_batch_size: 2</code> nên batcher bắn ngay, không mặn gom to. Với model nặng (GPU, hàng chục ms/request) thì ngược lại — gom được batch lớn mới đáng.</p>
+
+<h3>Bước 5 — Vặn núm <code>max_queue_delay</code> rồi đo lại</h3>
+<p>Sửa <code>config.pbtxt</code>: đổi <code>max_queue_delay_microseconds</code> thành <code>10000</code> (10ms) và <code>preferred_batch_size: [ 8 ]</code>, rồi <strong>restart server</strong> (<code>Ctrl+C</code> → <code>./serve.sh</code>) để config mới có hiệu lực.</p>
+<div class="callout warn">
+  <span class="label">Đừng dùng API load/unload vội</span>
+  Triton có <a href="https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/user_guide/model_management.html">Model Management API</a> (<code>POST /v2/repository/models/&lt;model&gt;/load</code>) để nạp lại model không cần restart — nhưng với mode mặc định (polling) bạn sẽ ăn lỗi <code>{"error":"explicit model load / unload is not allowed if polling is enabled"}</code>. Muốn dùng API này phải bật <code>--model-control-mode=explicit</code> khi khởi động. Ở giai đoạn học, restart server là đơn giản và đủ.
+</div>
+<p>Chạy lại burst 256 request với 32 threads (<code>--requests 256 --workers 32</code>) và so exec_count. Kết quả tham chiếu đo trên máy này (8 core CPU):</p>
+<table>
+  <thead><tr><th>Config dynamic_batching</th><th>256 request tốn… lần thực thi</th><th>Batch trung bình</th><th>Throughput burst</th></tr></thead>
+  <tbody>
+    <tr><td>delay 100µs, preferred [2,4,8]</td><td>+192</td><td>≈ 1.3</td><td>≈ 400 req/s</td></tr>
+    <tr><td>delay 10ms, preferred [8]</td><td>+42</td><td>≈ 6.1</td><td>≈ 350 req/s</td></tr>
+  </tbody>
+</table>
+<p>Batch to gấp ~4.5 lần, đổi giá bằng throughput tụt nhẹ — mỗi request phải chờ tối đa 10ms trong queue. Không có con số "đúng": nó phụ thuộc model thật của bạn nặng bao nhiêu và SLO latency là bao nhiêu. Bài 0003 sẽ đo cặp đánh đổi này chính xác bằng <code>perf_analyzer</code>.</p>
+
+<ul class="checklist">
+  <li><code>onnx_linear</code> READY cạnh <code>identity_cpu</code> sau restart</li>
+  <li>Inference đơn lẻ và batch <code>[2,10]</code> trả đúng 2x+1</li>
+  <li>Live config endpoint phản chiếu đúng <code>dynamic_batching</code> đã khai báo</li>
+  <li>Sau burst: <code>exec_count</code> tăng <em>ít hơn</em> <code>request_success</code> — bằng chứng gộp batch</li>
+  <li>Sau khi restart với delay 10ms: tỉ lệ gộp tăng rõ so với delay 100µs</li>
+</ul>
+
+<div class="quiz" data-quiz-id="lesson0002"></div>
+
+<h2>Đọc sâu hơn (nguồn chính)</h2>
+<ul>
+  <li><a href="https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/user_guide/model_configuration.html">Model Configuration guide</a> — phần <em>Delays and Batches</em> + <em>Instance Groups</em> (10 phút).</li>
+  <li><a href="https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/user_guide/batcher.html">Dynamic Batcher guide</a> — cơ chế preferred size / queue delay, gần như toàn bộ nội dung mục 3–5 của bài.</li>
+</ul>
+
+<div class="callout tip">
+  <span class="label">Bài tiếp theo sẽ là gì?</span>
+  Bạn đã có model thật + batcher. Bài 0003 sẽ trả lời "nhanh cỡ nào?" một cách <strong>định lượng</strong>: <code>perf_analyzer</code> — công cụ benchmark chính thức — đo throughput và latency p50/p90/p99, quét concurrency, so sánh trước/sau khi bật batching.
+</div>
+
+<div class="lesson-nav">
+  <a href="0001-triton-architecture-and-first-smoke-test.html">← Bài 0001: Kiến trúc &amp; smoke test</a>
+  <a href="0003-perf-analyzer-benchmark.html">Bài 0003: perf_analyzer →</a>
+</div>
+
+<script>
+window.QUIZZES = window.QUIZZES || {};
+window.QUIZZES["lesson0002"] = [
+  {
+    q: "Khai báo max_batch_size: 8 và dims: [10] — tensor input thật có shape nào?",
+    opts: ["[8, 10]", "[10] trơn", "[bất kỳ, 8, 10]"],
+    answer: 0,
+    explain: "Khi max_batch_size > 0, dims KHÔNG chứa chiều batch — Triton tự thêm chiều đầu tiên, kích thước 1..8. Khai báo dims: [-1, 10] lúc này là sai (thành tensor 3 chiều)."
+  },
+  {
+    q: "Trường nào bảo Triton đọc model file bằng onnxruntime?",
+    opts: ["platform: \"onnxruntime_onnx\"", "backend: \"onnx\"", "framework: \"onnxruntime\""],
+    answer: 0,
+    explain: "Model 'có định dạng' (onnx, tensorrt, openvino…) khai báo platform. 'backend:' dùng cho backend dạng thư viện như identity hay python."
+  },
+  {
+    q: "Tăng max_queue_delay_microseconds thường đánh đổi điều gì?",
+    opts: ["Latency tăng để đổi throughput", "Throughput tăng để đổi độ chính xác", "Không đánh đổi gì cả"],
+    answer: 0,
+    explain: "Delay cao hơn → gom được batch to hơn (throughput tốt hơn) nhưng mọi request phải chờ lâu hơn trong queue trước khi chạy. Đó là núm vặn throughput/latency."
+  },
+  {
+    q: "Metric nào là bằng chứng trực tiếp rằng batcher đang gộp request?",
+    opts: ["exec_count tăng ít hơn request_success", "request_success luôn bằng 0", "exec_count tăng nhanh hơn request_success"],
+    answer: 0,
+    explain: "Mỗi request vào được đếm ở request_success; mỗi lần model thực thi được đếm ở exec_count. Gộp 4 request thành 1 batch ⇒ +4 request nhưng chỉ +1 exec."
+  },
+  {
+    q: "instance_group count: 2 (KIND_CPU) nghĩa là gì?",
+    opts: ["2 bản sao model chạy song song", "Model được chia làm 2 nửa", "Chấp nhận tối đa 2 client"],
+    answer: 0,
+    explain: "Mỗi instance là một session onnxruntime độc lập — 2 batch có thể chạy song song thay vì chờ nhau. Trên GPU, KIND_GPU nhân bản model lên GPU."
+  }
+];
+</script>
+<script src="../assets/quiz.js"></script>
+</main>
+</body>
+</html>
